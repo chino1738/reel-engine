@@ -250,10 +250,9 @@ if (args.includes("--deliver")) {
   execFileSync("cp", [outFile, join(ROOT, "out", `${id}.txt`), reels]);
   console.log(`  → iCloud Drive/Reels/${id}.mp4`);
   if (process.env.IMESSAGE_TO) {
-    // Messages from a script won't deliver video attachments (shows "Not Delivered"), so the text
-    // carries the post kit and points to the video, which iCloud has already synced to the phone.
+    // Text the post kit, then the video. Uploads from the Mac are slow, so the text goes first.
     execFileSync("osascript", [join(ROOT, "scripts/imessage.applescript"), process.env.IMESSAGE_TO,
-      `🎬 New @bryzdaily reel ready (${lane.name}, ${voicePick.id.includes("Ava") ? "Ava" : "Brian"}): ${script.title}\n\nVideo: Files › iCloud Drive › Reels › ${id}.mp4\n\n${kit}`]);
+      `🎬 New @bryzdaily reel (${lane.name}, ${voicePick.id.includes("Ava") ? "Ava" : "Brian"}): ${script.title}\nVideo is the next message (can take a few minutes to upload).\n\n${kit}`, outFile]);
     console.log(`  → texted to ${process.env.IMESSAGE_TO}`);
   }
 }
