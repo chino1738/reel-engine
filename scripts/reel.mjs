@@ -99,7 +99,7 @@ else {
     writeFileSync(join(ROOT, "public", rel), buf);
     s.video = rel;
     s.credit = clip.credit;
-    console.log(`  scene ${i + 1}: "${s.broll}" → pexels ${clip.id} (${(buf.length / 1e6).toFixed(1)} MB)`);
+    console.log(`  scene ${i + 1}: "${s.broll}" → ${clip.credit.split(" / ")[1].toLowerCase()} ${clip.id} (${(buf.length / 1e6).toFixed(1)} MB)`);
   }
 }
 
