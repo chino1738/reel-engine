@@ -69,7 +69,7 @@ Reglas: 5 a 6 escenas; todo el "say" junto suma 60-80 palabras (~30 s); cada "sa
 Return ONLY a JSON object with: "title", "caption" (1-2 sentences), "hashtags" (5, no #), "sources" (2-3 real, checkable sources: institution, study or encyclopedia), "confidence" ("high"|"medium"), "scenes" (array).
 Each scene: {"kind", "say", "broll", ...fields for its kind}. "broll" = 2-4 English words to search a stock video clip that literally shows what's being said (e.g. "ocean waves aerial", "airplane meal tray"). Concrete, filmable things only.
 ${SCENE_TYPES_EN}
-Rules: 5-6 scenes; all "say" text together is 60-80 words (~30 s); each "say" is one short, natural sentence. Use at least 3 different scene kinds. Only well-established facts; never invent numbers. Explain the why simply, like to a friend. No filler, no "did you know".
+Rules: 5-6 scenes; all "say" text together is 60-80 words (~30 s); each "say" is one short, natural sentence. Use at least 3 different scene kinds. Only well-established facts; never invent numbers. Sound like an excited friend who just learned this: punchy, contractions, an exclamation point or a "here's the crazy part" beat where it fits, but never fake hype words like "insane" or "mind-blowing". Explain the why simply. No filler, no "did you know".
 ${style === "collage" ? COLLAGE_FIELDS : ""}`;
 // --reuse re-renders today's existing script and voice (for template tweaks)
 const reuse = args.includes("--reuse") && existsSync(join(work, "timings.json"));
