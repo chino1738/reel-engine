@@ -10,7 +10,7 @@ import { renderMedia, selectComposition } from "@remotion/renderer";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const flag = (n, d) => (args.includes(n) ? args[args.indexOf(n) + 1] : d);
-const BOOL = new Set(["--reuse"]);
+const BOOL = new Set(["--reuse", "--revoice"]);
 loadEnv(join(dirname(fileURLToPath(import.meta.url)), "..", ".env"));
 function loadEnv(path) {
   if (!existsSync(path)) return;
@@ -23,7 +23,13 @@ const topic = args.filter((a, i) => !a.startsWith("--") && !(args[i - 1]?.starts
 const lang = flag("--lang", "en");
 const style = flag("--style", "collage"); // collage | footage
 const handle = flag("--handle", lang === "es" ? "@curiosidades" : "@yourhandle");
-const voice = flag("--voice", lang === "es" ? "es-MX-JorgeNeural" : "en-US-BrianNeural");
+// voices he picked 10/28: brian (default) and ava; both Multilingual, tuned for energy
+const VOICES = {
+  brian: { id: "en-US-BrianMultilingualNeural", rate: "+18%", pitch: "+3Hz" },
+  ava: { id: "en-US-AvaMultilingualNeural", rate: "+16%", pitch: "+0Hz" },
+  jorge: { id: "es-MX-JorgeNeural", rate: "+12%", pitch: "+0Hz" },
+};
+const voicePick = VOICES[flag("--voice", lang === "es" ? "jorge" : "brian")] ?? { id: flag("--voice"), rate: "+15%", pitch: "+0Hz" };
 if (!topic) {
   console.error('Give it a topic: npm run reel -- "por qué el cielo es azul"');
   process.exit(1);
@@ -89,7 +95,9 @@ console.log(`  "${script.title}" · ${script.scenes.length} scenes · confidence
 step("Recording the voiceover");
 const audioRel = `work/${id}.mp3`;
 const timingPath = join(work, "timings.json");
-if (!reuse) execFileSync("python3", [join(ROOT, "scripts/tts.py"), join(work, "script.json"), join(ROOT, "public", audioRel), timingPath, voice], { stdio: "inherit" });
+// --revoice keeps the script but records the voice again (e.g. after a voice change)
+if (!reuse || args.includes("--revoice"))
+  execFileSync("python3", [join(ROOT, "scripts/tts.py"), join(work, "script.json"), join(ROOT, "public", audioRel), timingPath, voicePick.id, voicePick.rate, voicePick.pitch], { stdio: "inherit" });
 const timing = JSON.parse(readFileSync(timingPath, "utf8"));
 const scenes = script.scenes.map((s, i) => ({ ...s, ...timing.scenes[i] }));
 

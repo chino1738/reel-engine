@@ -1,6 +1,6 @@
 """Voice every scene with edge-tts and keep per-word timings.
 
-usage: python3 tts.py <script.json> <out.mp3> <timings.json> [voice]
+usage: python3 tts.py <script.json> <out.mp3> <timings.json> [voice] [rate] [pitch]
 Writes one mp3 for the whole reel and a JSON list of scenes with start/end
 seconds plus every word's start/end, so the video can sync to the voice.
 """
@@ -10,9 +10,9 @@ FFMPEG = os.environ.get("FFMPEG", os.path.expanduser("~/projects/voice-claude-ap
 GAP = 0.25  # breath between scenes, seconds
 
 
-async def voice_scene(text, voice, path):
+async def voice_scene(text, voice, path, rate, pitch):
     words, audio = [], bytearray()
-    comm = __import__("edge_tts").Communicate(text, voice, rate="+12%", boundary="WordBoundary")
+    comm = __import__("edge_tts").Communicate(text, voice, rate=rate, pitch=pitch, boundary="WordBoundary")
     async for chunk in comm.stream():
         if chunk["type"] == "audio":
             audio.extend(chunk["data"])
@@ -29,7 +29,7 @@ def duration(path):
     return int(h) * 3600 + int(m) * 60 + float(s)
 
 
-async def main(script_path, out_mp3, out_json, voice):
+async def main(script_path, out_mp3, out_json, voice, rate, pitch):
     script = json.load(open(script_path))
     tmp = tempfile.mkdtemp()
     parts, scenes, t = [], [], 0.0
@@ -38,7 +38,7 @@ async def main(script_path, out_mp3, out_json, voice):
                     "-t", str(GAP), "-q:a", "9", silence], check=True)
     for i, sc in enumerate(script["scenes"]):
         p = os.path.join(tmp, f"s{i}.mp3")
-        words = await voice_scene(sc["say"], voice, p)
+        words = await voice_scene(sc["say"], voice, p, rate, pitch)
         d = duration(p)
         scenes.append({"start": t, "end": t + d, "words": [{**w, "s": w["s"] + t, "e": w["e"] + t} for w in words]})
         parts += [p, silence]
@@ -52,4 +52,5 @@ async def main(script_path, out_mp3, out_json, voice):
 
 if __name__ == "__main__":
     a = sys.argv[1:]
-    asyncio.run(main(a[0], a[1], a[2], a[3] if len(a) > 3 else "es-MX-JorgeNeural"))
+    asyncio.run(main(a[0], a[1], a[2], a[3] if len(a) > 3 else "es-MX-JorgeNeural",
+                     a[4] if len(a) > 4 else "+12%", a[5] if len(a) > 5 else "+0Hz"))
