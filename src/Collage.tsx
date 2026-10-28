@@ -16,16 +16,16 @@ import { loadFont as loadSerif } from "@remotion/google-fonts/InstrumentSerif";
 import { loadFont as loadMono } from "@remotion/google-fonts/JetBrainsMono";
 import { loadFont as loadHand } from "@remotion/google-fonts/Caveat";
 
-const { fontFamily: STAMP } = loadAnton("normal", { subsets: ["latin", "latin-ext"] });
-const { fontFamily: SANS } = loadInter("normal", { weights: ["600", "800"], subsets: ["latin", "latin-ext"] });
+export const { fontFamily: STAMP } = loadAnton("normal", { subsets: ["latin", "latin-ext"] });
+export const { fontFamily: SANS } = loadInter("normal", { weights: ["600", "800"], subsets: ["latin", "latin-ext"] });
 const { fontFamily: SERIF } = loadSerif("italic", { subsets: ["latin", "latin-ext"] });
 const { fontFamily: MONO } = loadMono("normal", { weights: ["500"], subsets: ["latin"] });
-const { fontFamily: HAND } = loadHand("normal", { weights: ["700"], subsets: ["latin", "latin-ext"] });
+export const { fontFamily: HAND } = loadHand("normal", { weights: ["700"], subsets: ["latin", "latin-ext"] });
 
 export const FPS = 30;
-const PAPER = "#F1ECE2";
-const INK = "#191613";
-const RED = "#E0352B";
+export const PAPER = "#F1ECE2";
+export const INK = "#191613";
+export const RED = "#E0352B";
 const CORK = "#B98A5A";
 
 type Word = { w: string; s: number; e: number };
@@ -48,12 +48,12 @@ export type CScene = Base &
   );
 export type CollageProps = { audio: string; handle: string; total: number; scenes: CScene[] };
 
-const pop = (f: number, fps: number, delay = 0, damping = 11) =>
+export const pop = (f: number, fps: number, delay = 0, damping = 11) =>
   spring({ frame: f - delay, fps, config: { damping, mass: 0.55, stiffness: 170 } });
-const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
+export const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
 
 /* Die-cut sticker: white outline + soft contact shadow, made from the PNG's own alpha. */
-const STICKER =
+export const STICKER =
   "drop-shadow(4px 0 0 #fff) drop-shadow(-4px 0 0 #fff) drop-shadow(0 4px 0 #fff) drop-shadow(0 -4px 0 #fff) drop-shadow(0 18px 22px rgba(40,25,10,0.28))";
 
 function Sticker({ src, size, delay = 0, tilt = 0, x = 0, y = 0 }: { src: string; size: number; delay?: number; tilt?: number; x?: number; y?: number }) {
@@ -81,7 +81,7 @@ function Sticker({ src, size, delay = 0, tilt = 0, x = 0, y = 0 }: { src: string
 }
 
 /* Rubber stamp that slams down. */
-function Stamp({ text, x, y, size = 120, delay = 0, tilt = -8 }: { text: string; x: number; y: number; size?: number; delay?: number; tilt?: number }) {
+export function Stamp({ text, x, y, size = 120, delay = 0, tilt = -8 }: { text: string; x: number; y: number; size?: number; delay?: number; tilt?: number }) {
   const f = useCurrentFrame();
   const { fps } = useVideoConfig();
   const p = spring({ frame: f - delay, fps, config: { damping: 9, mass: 0.5, stiffness: 260 } });
@@ -115,7 +115,7 @@ function Stamp({ text, x, y, size = 120, delay = 0, tilt = -8 }: { text: string;
 }
 
 /* Hand-drawn red loop that draws itself around something. */
-function DrawCircle({ cx, cy, rx, ry, delay = 0 }: { cx: number; cy: number; rx: number; ry: number; delay?: number }) {
+export function DrawCircle({ cx, cy, rx, ry, delay = 0 }: { cx: number; cy: number; rx: number; ry: number; delay?: number }) {
   const f = useCurrentFrame();
   const t = interpolate(f, [delay, delay + 14], [0, 1], clamp);
   const len = 2 * Math.PI * Math.max(rx, ry) * 1.15;
@@ -158,7 +158,8 @@ function Polaroid({ src, caption, x, y, tilt, delay }: { src: string; caption: s
 }
 
 /* The spoken sentence builds word by word; chosen words go red italic serif. */
-function Headline({ scene }: { scene: CScene }) {
+export function Headline({ scene }: { scene: CScene }) {
+  const cork = scene.kind === "hook";
   const f = useCurrentFrame();
   const t = scene.start + f / FPS;
   const em = new Set([scene.em ?? []].flat().map((w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "")));
@@ -180,7 +181,8 @@ function Headline({ scene }: { scene: CScene }) {
               fontSize: isEm ? 84 : 70,
               lineHeight: 1.18,
               letterSpacing: isEm ? "0" : "-0.02em",
-              color: isEm ? RED : INK,
+              color: cork ? (isEm ? "#FFD08A" : "#FFF8EC") : isEm ? RED : INK,
+              textShadow: cork ? "0 3px 14px rgba(20,12,4,0.55)" : undefined,
               opacity: shown ? interpolate(age, [0, 3], [0.25, 1], clamp) : 0,
               translate: `0px ${shown ? interpolate(age, [0, 4], [10, 0], clamp) : 0}px`,
             }}
@@ -193,7 +195,7 @@ function Headline({ scene }: { scene: CScene }) {
   );
 }
 
-function Board({ cork }: { cork: boolean }) {
+export function Board({ cork }: { cork: boolean }) {
   // deterministic speckles so the cork reads as a material, not a flat fill
   const dots = cork
     ? Array.from({ length: 260 }, (_, i) => ({ x: random(`x${i}`) * 1080, y: random(`y${i}`) * 1920, r: 2 + random(`r${i}`) * 5, o: 0.12 + random(`o${i}`) * 0.25 }))
@@ -316,7 +318,7 @@ function labelOf(src: string) {
 }
 
 /* The 3D mascot: swaps pose per scene with a squash-and-stretch hop, idles with a gentle bob. */
-function Mascot({ scenes }: { scenes: CScene[] }) {
+export function Mascot({ scenes }: { scenes: CScene[] }) {
   const f = useCurrentFrame();
   const { fps } = useVideoConfig();
   const t = f / fps;
@@ -346,7 +348,7 @@ function Mascot({ scenes }: { scenes: CScene[] }) {
   );
 }
 
-function Chrome({ scenes, total, handle }: { scenes: CScene[]; total: number; handle: string }) {
+export function Chrome({ scenes, total, handle }: { scenes: CScene[]; total: number; handle: string }) {
   const f = useCurrentFrame();
   const t = f / FPS;
   let i = scenes.findIndex((s) => t < s.end + 0.25);
@@ -427,7 +429,7 @@ export function Collage({ audio, handle, total, scenes }: CollageProps) {
   );
 }
 
-function Exit({ frames, children }: { frames: number; children: React.ReactNode }) {
+export function Exit({ frames, children }: { frames: number; children: React.ReactNode }) {
   const f = useCurrentFrame();
   const o = interpolate(f, [frames - 5, frames], [1, 0], clamp);
   return <AbsoluteFill style={{ opacity: o, scale: String(interpolate(f, [frames - 5, frames], [1, 0.94], clamp)) }}>{children}</AbsoluteFill>;

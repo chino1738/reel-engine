@@ -21,7 +21,7 @@ function loadEnv(path) {
 }
 const topic = args.filter((a, i) => !a.startsWith("--") && !(args[i - 1]?.startsWith("--") && !BOOL.has(args[i - 1]))).join(" ").trim();
 const lang = flag("--lang", "en");
-const style = flag("--style", "collage"); // collage | footage
+const style = flag("--style", "demo"); // demo | collage | footage
 const handle = flag("--handle", lang === "es" ? "@curiosidades" : "@yourhandle");
 // voices he picked 10/28: brian (default) and ava; both Multilingual, tuned for energy
 const VOICES = {
@@ -36,7 +36,7 @@ if (!topic) {
 }
 
 const slug = topic.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
-const id = `${new Date().toISOString().slice(0, 10)}-${slug}${flag("--style", "collage") === "collage" ? "" : "-footage"}`;
+const id = `${new Date().toISOString().slice(0, 10)}-${slug}${style === "demo" ? "" : `-${style}`}`;
 const work = join(ROOT, "work", id);
 mkdirSync(work, { recursive: true });
 mkdirSync(join(ROOT, "out"), { recursive: true });
@@ -65,6 +65,21 @@ const COLLAGE_FIELDS = `Also give every scene:
 - "stamp": optional 1-2 word stamp in caps for hook/line/end scenes (e.g. "WHY?", "PLOT TWIST", "NOPE").
 OBJECT LIST:
 ${readFileSync(join(ROOT, "data/fluent-names.txt"), "utf8").split("\n").join(" | ")}`;
+const DEMO_FIELDS = `THE VISUALS MUST ACT OUT EXACTLY WHAT IS SAID. Give every scene:
+- "beats": 2-4 visual beats, in the order their words are spoken. Each beat:
+  {"on": one word copied EXACTLY from that scene's "say" (the moment it should happen),
+   "show": the object, EXACTLY one name from the OBJECT LIST, or a drawn rig: "rig:glass" (glass of water), "rig:bottle" (plastic water bottle), "rig:thermometer",
+   "do": one verb from the VERBS list that acts out the words,
+   "to": optional second object for pour/arrow,
+   "fx": optional particles from FX,
+   "where": "left" | "center" | "right"}
+- Rules: if the words name a concrete thing, show that thing on that word. If they describe something happening (spilling, melting, freezing, falling, growing, evaporating, breaking), use the verb that shows it happening. "glass of water" = rig:glass with appear; "water bottle spilling" = rig:bottle with spill. Use left/right for two things being compared or interacting, center for one hero thing. A new beat in the same "where" replaces the previous one there. The FIRST beat of every scene must be on one of its first 3 words so the screen is never empty; for lead-ins like "Here's the crazy part" show a reaction object (e.g. Exploding head, Face with open mouth, Light bulb) on the first word.
+- "em": 1-2 words copied exactly from that scene's "say" to highlight.
+- "stamp": optional 1-2 word stamp in caps for hook/line scenes (e.g. "WHY?", "PLOT TWIST").
+VERBS: appear (pops in), drop (falls in and lands), slide, fly (flies in on an arc), spin, shake (vibrates/shivers), grow (gets bigger), shrink, pulse (heartbeat), bounce, float (drifts up), sink (sinks down), orbit (circles around), spill (tips over, liquid pours out), pour (tips and pours into "to"), fill (liquid level rises), drain (level drops), rain (drops fall from it), evaporate (steam rises, level drops / it fades up), melt, freeze (turns icy, snow), heat (gets hot, flames), burst (pops apart into particles), crack (splits in two), multiply (becomes many copies), zoom (magnifying glass zooms in), cross (red X: wrong/myth), check (green check: true), arrow (arrow to "to"), glow.
+FX: droplets, sparkles, steam, smoke, dust, confetti, snow, fire, bubbles, salt, hearts, zap.
+OBJECT LIST:
+${readFileSync(join(ROOT, "data/fluent-names.txt"), "utf8").split("\n").join(" | ")}`;
 const prompt = lang === "es"
   ? `Eres guionista de reels de curiosidades en español latino neutro. Tema: "${topic}".
 Devuelve SOLO un objeto JSON con: "title", "caption" (1-2 frases), "hashtags" (5, sin #), "sources" (2-3 fuentes reales y verificables), "confidence" ("alta"|"media"), "scenes" (lista).
@@ -76,7 +91,7 @@ Return ONLY a JSON object with: "title", "caption" (1-2 sentences), "hashtags" (
 Each scene: {"kind", "say", "broll", ...fields for its kind}. "broll" = 2-4 English words to search a stock video clip that literally shows what's being said (e.g. "ocean waves aerial", "airplane meal tray"). Concrete, filmable things only.
 ${SCENE_TYPES_EN}
 Rules: 5-6 scenes; all "say" text together is 60-80 words (~30 s); each "say" is one short, natural sentence. Use at least 3 different scene kinds. Only well-established facts; never invent numbers. Sound like an excited friend who just learned this: punchy, contractions, an exclamation point or a "here's the crazy part" beat where it fits, but never fake hype words like "insane" or "mind-blowing". Explain the why simply. No filler, no "did you know".
-${style === "collage" ? COLLAGE_FIELDS : ""}`;
+${style === "collage" ? COLLAGE_FIELDS : style === "demo" ? DEMO_FIELDS : ""}`;
 // --reuse re-renders today's existing script and voice (for template tweaks)
 const reuse = args.includes("--reuse") && existsSync(join(work, "timings.json"));
 let script;
@@ -103,6 +118,32 @@ const scenes = script.scenes.map((s, i) => ({ ...s, ...timing.scenes[i] }));
 
 // 3a. Collage art: 3D objects + a mascot pose per scene, from Microsoft's MIT-licensed Fluent emoji.
 const POSES = { hook: "Man raising hand", line: "Man detective", stat: "Man tipping hand", compare: "Man shrugging", list: "Man teacher", end: "Man raising hand" };
+if (style === "demo") {
+  step("Choreographing beats");
+  const norm = (w) => w.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9%]/g, "");
+  for (const s of scenes) {
+    const beats = [];
+    let cursor = 0;
+    for (const [k, b] of (s.beats ?? []).entries()) {
+      const target = norm(b.on ?? "");
+      let wi = s.words.findIndex((w, i) => i >= cursor && target && (norm(w.w) === target || norm(w.w).startsWith(target) || target.startsWith(norm(w.w)) && norm(w.w).length > 3));
+      if (wi < 0) wi = Math.min(s.words.length - 1, Math.round(((k + 0.5) / (s.beats.length)) * s.words.length) - 1);
+      cursor = Math.max(cursor, wi + 1);
+      const show = b.show?.startsWith("rig:") ? b.show : await fluentAsset(b.show ?? "");
+      if (!show) continue;
+      const to = b.to ? (b.to.startsWith("rig:") ? b.to : await fluentAsset(b.to)) : undefined;
+      beats.push({ at: s.words[Math.max(0, wi)]?.s ?? s.start, show, do: b.do ?? "appear", to: to ?? undefined, fx: b.fx || undefined, where: ["left", "center", "right"].includes(b.where) ? b.where : "center" });
+    }
+    // a later beat in the same spot takes over; center clears the sides and vice versa
+    for (const [i, b] of beats.entries()) {
+      const next = beats.slice(i + 1).find((n) => n.where === b.where || n.where === "center" || b.where === "center");
+      if (next) b.until = next.at;
+    }
+    s.beats = beats;
+    s.mascot = await fluentAsset(POSES[s.kind] ?? "Man tipping hand", "medium");
+  }
+  console.log(`  ${scenes.map((s) => s.beats.map((b) => b.do).join("+")).join(" | ")}`);
+}
 if (style === "collage") {
   step("Pulling 3D art");
   for (const s of scenes) {
@@ -153,7 +194,7 @@ else {
 step("Rendering the video");
 const serveUrl = await bundle({ entryPoint: join(ROOT, "src/index.ts"), publicDir: join(ROOT, "public") });
 const inputProps = { audio: audioRel, handle, lang, total: timing.total, scenes };
-const composition = await selectComposition({ serveUrl, id: style === "collage" ? "Collage" : "Reel", inputProps });
+const composition = await selectComposition({ serveUrl, id: { demo: "Demo", collage: "Collage" }[style] ?? "Reel", inputProps });
 const outFile = join(ROOT, "out", `${id}.mp4`);
 let last = -1;
 await renderMedia({
