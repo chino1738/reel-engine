@@ -10,7 +10,7 @@ import { renderMedia, selectComposition } from "@remotion/renderer";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const flag = (n, d) => (args.includes(n) ? args[args.indexOf(n) + 1] : d);
-const BOOL = new Set(["--reuse", "--revoice"]);
+const BOOL = new Set(["--reuse", "--revoice", "--auto", "--deliver"]);
 loadEnv(join(dirname(fileURLToPath(import.meta.url)), "..", ".env"));
 function loadEnv(path) {
   if (!existsSync(path)) return;
@@ -19,7 +19,28 @@ function loadEnv(path) {
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
   }
 }
-const topic = args.filter((a, i) => !a.startsWith("--") && !(args[i - 1]?.startsWith("--") && !BOOL.has(args[i - 1]))).join(" ").trim();
+let topic = args.filter((a, i) => !a.startsWith("--") && !(args[i - 1]?.startsWith("--") && !BOOL.has(args[i - 1]))).join(" ").trim();
+
+// Lanes rotate daily so the numbers can show what sticks. Each lane carries its honesty rule.
+const LANES = [
+  { name: "curiosity", brief: "an everyday 'why does X happen' science or body question", rule: "Only well-established science." },
+  { name: "money", brief: "how a real company, product or everyday thing actually makes money (e.g. why Costco's hot dog is still $1.50)", rule: "Real, checkable business facts. No income promises, no get-rich claims." },
+  { name: "true story", brief: "a wild but TRUE, documented story from history or the news (e.g. the man who sold the Eiffel Tower)", rule: "Only documented events. Never invent details, quotes or names." },
+  { name: "conspiracy", brief: "a famous conspiracy theory: what people believe, then what the evidence actually shows", rule: "Never present a false claim as true. State plainly what is proven, what is not, and what is false." },
+  { name: "ai", brief: "a genuinely useful Claude / AI tip or a surprising fact about how AI works", rule: "Accurate, current, no hype. Nothing you are unsure is true." },
+];
+const HIST = join(ROOT, "work", "history.json");
+const history = existsSync(HIST) ? JSON.parse(readFileSync(HIST, "utf8")) : [];
+const day = Math.floor(Date.now() / 86400000);
+const lane = LANES.find((l) => l.name === flag("--lane")) ?? LANES[day % LANES.length];
+if (args.includes("--auto")) {
+  const pick = execFileSync("claude", ["-p", "--model", "sonnet",
+    `Pick ONE specific, highly clickable short-video topic. Lane: ${lane.brief}. ${lane.rule}
+Already done (never repeat or closely overlap): ${history.map((h) => h.topic).join(" | ") || "none"}.
+Return ONLY the topic as a short phrase, no quotes, no punctuation at the end.`], { encoding: "utf8" }).trim().split("\n").pop();
+  topic = pick;
+  console.log(`▸ Lane "${lane.name}" → ${topic}`);
+}
 const lang = flag("--lang", "en");
 const style = flag("--style", "demo"); // demo | collage | footage
 const handle = flag("--handle", lang === "es" ? "@curiosidades" : "@bryzdaily");
@@ -29,7 +50,8 @@ const VOICES = {
   ava: { id: "en-US-AvaMultilingualNeural", rate: "+16%", pitch: "+0Hz" },
   jorge: { id: "es-MX-JorgeNeural", rate: "+12%", pitch: "+0Hz" },
 };
-const voicePick = VOICES[flag("--voice", lang === "es" ? "jorge" : "brian")] ?? { id: flag("--voice"), rate: "+15%", pitch: "+0Hz" };
+// --auto alternates Brian / Ava by day so we learn which one performs
+const voicePick = VOICES[flag("--voice", lang === "es" ? "jorge" : args.includes("--auto") ? (day % 2 ? "ava" : "brian") : "brian")] ?? { id: flag("--voice"), rate: "+15%", pitch: "+0Hz" };
 if (!topic) {
   console.error('Give it a topic: npm run reel -- "por qué el cielo es azul"');
   process.exit(1);
@@ -90,7 +112,7 @@ Reglas: 5 a 6 escenas; todo el "say" junto suma 60-80 palabras (~30 s); cada "sa
 Return ONLY a JSON object with: "title", "caption" (1-2 sentences), "hashtags" (5, no #), "sources" (2-3 real, checkable sources: institution, study or encyclopedia), "confidence" ("high"|"medium"), "scenes" (array).
 Each scene: {"kind", "say", "broll", ...fields for its kind}. "broll" = 2-4 English words to search a stock video clip that literally shows what's being said (e.g. "ocean waves aerial", "airplane meal tray"). Concrete, filmable things only.
 ${SCENE_TYPES_EN}
-Rules: 5-6 scenes; all "say" text together is 60-80 words (~30 s); each "say" is one short, natural sentence. Use at least 3 different scene kinds. Only well-established facts; never invent numbers. Sound like an excited friend who just learned this: punchy, contractions, an exclamation point or a "here's the crazy part" beat where it fits, but never fake hype words like "insane" or "mind-blowing". Explain the why simply. No filler, no "did you know".
+${args.includes("--auto") ? `Lane: ${lane.name}. ${lane.rule}\n` : ""}Rules: 5-6 scenes; all "say" text together is 60-80 words (~30 s); each "say" is one short, natural sentence. Use at least 3 different scene kinds. Only well-established facts; never invent numbers. Sound like an excited friend who just learned this: punchy, contractions, an exclamation point or a "here's the crazy part" beat where it fits, but never fake hype words like "insane" or "mind-blowing". Explain the why simply. No filler, no "did you know".
 ${style === "collage" ? COLLAGE_FIELDS : style === "demo" ? DEMO_FIELDS : ""}`;
 // --reuse re-renders today's existing script and voice (for template tweaks)
 const reuse = args.includes("--reuse") && existsSync(join(work, "timings.json"));
@@ -215,6 +237,23 @@ const credits = [...new Set(scenes.map((s) => s.credit).filter(Boolean))];
 const kit = `${script.caption}\n\n${script.hashtags.map((h) => `#${h}`).join(" ")}\n\n--- check before posting (confidence: ${script.confidence}) ---\n${script.sources.map((s) => `• ${s}`).join("\n")}\n${credits.length ? `\nFootage: ${credits.join(", ")}\n` : ""}`;
 writeFileSync(join(ROOT, "out", `${id}.txt`), kit);
 console.log(`\n\n✓ ${outFile}\n✓ ${join(ROOT, "out", `${id}.txt`)}`);
+
+history.push({ date: id.slice(0, 10), topic, lane: args.includes("--auto") ? lane.name : "manual", voice: voicePick.id, file: `${id}.mp4` });
+writeFileSync(HIST, JSON.stringify(history, null, 2));
+
+// 6. Deliver: iCloud Drive/Reels for the phone, plus a text if a number is set.
+if (args.includes("--deliver")) {
+  step("Delivering");
+  const reels = join(process.env.HOME, "Library/Mobile Documents/com~apple~CloudDocs/Reels");
+  mkdirSync(reels, { recursive: true });
+  execFileSync("cp", [outFile, join(ROOT, "out", `${id}.txt`), reels]);
+  console.log(`  → iCloud Drive/Reels/${id}.mp4`);
+  if (process.env.IMESSAGE_TO) {
+    execFileSync("osascript", [join(ROOT, "scripts/imessage.applescript"), process.env.IMESSAGE_TO, outFile,
+      `Today's reel (${lane.name}, ${voicePick.id.includes("Ava") ? "Ava" : "Brian"}): ${script.title}\n\n${kit}`]);
+    console.log(`  → texted to ${process.env.IMESSAGE_TO}`);
+  }
+}
 
 async function findClip(query, used, need) {
   return process.env.PEXELS_API_KEY ? findPexels(query, used, need) : findPixabay(query, used, need);
