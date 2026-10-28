@@ -1,6 +1,7 @@
 import {
   AbsoluteFill,
   Audio,
+  OffthreadVideo,
   Sequence,
   interpolate,
   spring,
@@ -20,7 +21,7 @@ const PAPER = "#F4EFE6";
 const SUN = "#FFD23F";
 
 type Word = { w: string; s: number; e: number };
-type Base = { start: number; end: number; words: Word[] };
+type Base = { start: number; end: number; words: Word[]; video?: string };
 export type Scene = Base &
   (
     | { kind: "hook" | "line" | "end"; big: string }
@@ -28,7 +29,7 @@ export type Scene = Base &
     | { kind: "compare"; a: string; b: string; aNote?: string; bNote?: string }
     | { kind: "list"; items: string[] }
   );
-export type ReelProps = { audio: string; handle: string; total: number; scenes: Scene[] };
+export type ReelProps = { audio: string; handle: string; lang?: "en" | "es"; total: number; scenes: Scene[] };
 
 const ease = (f: number, fps: number, delay = 0, damping = 14) =>
   spring({ frame: f - delay, fps, config: { damping, mass: 0.6, stiffness: 140 } });
@@ -50,6 +51,7 @@ function SlamText({ text, size, color = PAPER, accentLast = false }: { text: str
               fontSize: size,
               textTransform: "uppercase",
               letterSpacing: "-0.01em",
+              textShadow: "0 6px 24px rgba(0,0,0,0.6)",
               color: accentLast && i === words.length - 1 ? SUN : color,
               display: "inline-block",
               opacity: interpolate(p, [0, 0.3], [0, 1], { extrapolateRight: "clamp" }),
@@ -64,27 +66,27 @@ function SlamText({ text, size, color = PAPER, accentLast = false }: { text: str
   );
 }
 
-/* Counts the leading number up, keeps any suffix like % or x. */
-function CountUp({ value }: { value: string }) {
+/* Counts the leading number up in the reel's own number format, then lands on the written value. */
+function CountUp({ value, lang }: { value: string; lang: "en" | "es" }) {
   const f = useCurrentFrame();
   const { fps } = useVideoConfig();
   const m = value.match(/^([^\d]*)([\d.,]+)(.*)$/);
   const p = ease(f, fps, 0, 22);
+  const [dec, thou] = lang === "es" ? [",", "."] : [".", ","];
   let shown = value;
-  // count up with the source's own decimals and separators, land exactly on the written value
   if (m && p < 0.97) {
-    const decimalComma = /,\d{1,2}$/.test(m[2]);
-    const decimals = decimalComma ? m[2].split(",")[1].length : 0;
-    const n = parseFloat(decimalComma ? m[2].replace(/\./g, "").replace(",", ".") : m[2].replace(/[.,]/g, ""));
+    const decRe = new RegExp(`\\${dec}(\\d{1,2})$`);
+    const dm = m[2].match(decRe);
+    const decimals = dm ? dm[1].length : 0;
+    const intPart = dm ? m[2].slice(0, -dm[0].length) : m[2];
+    const n = parseFloat(intPart.split(thou).join("").split(dec).join("") + (dm ? "." + dm[1] : ""));
     if (!Number.isNaN(n)) {
-      const cur = (n * Math.max(0, p)).toFixed(decimals);
-      const [int, frac] = cur.split(".");
-      const grouped = int.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-      shown = `${m[1]}${grouped}${frac ? "," + frac : ""}${m[3]}`;
+      const [int, frac] = (n * Math.max(0, p)).toFixed(decimals).split(".");
+      shown = `${m[1]}${int.replace(/\B(?=(\d{3})+(?!\d))/g, thou)}${frac ? dec + frac : ""}${m[3]}`;
     }
   }
   return (
-    <div style={{ fontFamily: DISPLAY, fontSize: 340, color: SUN, lineHeight: 0.9, transform: `scale(${0.85 + 0.15 * p})`, fontVariantNumeric: "tabular-nums" }}>
+    <div style={{ fontFamily: DISPLAY, fontSize: 320, color: SUN, lineHeight: 0.9, transform: `scale(${0.85 + 0.15 * p})`, fontVariantNumeric: "tabular-nums", textShadow: "0 8px 30px rgba(0,0,0,0.55)" }}>
       {shown}
     </div>
   );
@@ -95,13 +97,13 @@ function Label({ children, delay = 8 }: { children: string; delay?: number }) {
   const { fps } = useVideoConfig();
   const p = ease(f, fps, delay);
   return (
-    <div style={{ fontFamily: TEXT, fontWeight: 800, fontSize: 58, color: PAPER, textAlign: "center", maxWidth: 860, lineHeight: 1.15, opacity: p, transform: `translateY(${(1 - p) * 30}px)` }}>
+    <div style={{ fontFamily: TEXT, fontWeight: 800, fontSize: 58, color: PAPER, textAlign: "center", maxWidth: 860, lineHeight: 1.15, opacity: p, transform: `translateY(${(1 - p) * 30}px)`, textShadow: "0 4px 18px rgba(0,0,0,0.7)" }}>
       {children}
     </div>
   );
 }
 
-function SceneBody({ scene }: { scene: Scene }) {
+function SceneBody({ scene, lang }: { scene: Scene; lang: "en" | "es" }) {
   const f = useCurrentFrame();
   const { fps } = useVideoConfig();
   switch (scene.kind) {
@@ -114,7 +116,7 @@ function SceneBody({ scene }: { scene: Scene }) {
     case "stat":
       return (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 36 }}>
-          <CountUp value={scene.big} />
+          <CountUp value={scene.big} lang={lang} />
           <Label>{scene.label}</Label>
         </div>
       );
@@ -144,13 +146,26 @@ function SceneBody({ scene }: { scene: Scene }) {
             return (
               <div key={i} style={{ display: "flex", alignItems: "center", gap: 32, opacity: p, transform: `translateX(${(1 - p) * -90}px)` }}>
                 <div style={{ fontFamily: DISPLAY, fontSize: 120, color: SUN, width: 90, lineHeight: 1 }}>{i + 1}</div>
-                <div style={{ fontFamily: DISPLAY, fontSize: 96, color: PAPER, textTransform: "uppercase", lineHeight: 1 }}>{it}</div>
+                <div style={{ fontFamily: DISPLAY, fontSize: 96, color: PAPER, textTransform: "uppercase", lineHeight: 1, textShadow: "0 6px 24px rgba(0,0,0,0.6)" }}>{it}</div>
               </div>
             );
           })}
         </div>
       );
   }
+}
+
+/* Scene footage: slow push-in, darkened so the type always reads. */
+function Footage({ src, frames }: { src: string; frames: number }) {
+  const f = useCurrentFrame();
+  const s = interpolate(f, [0, frames], [1.12, 1.0], { extrapolateRight: "clamp" });
+  const fadeIn = interpolate(f, [0, 5], [0, 1], { extrapolateRight: "clamp" });
+  return (
+    <AbsoluteFill style={{ opacity: fadeIn }}>
+      <OffthreadVideo src={staticFile(src)} muted style={{ width: "100%", height: "100%", objectFit: "cover", transform: `scale(${s})` }} />
+      <AbsoluteFill style={{ background: "linear-gradient(180deg, rgba(14,12,10,0.55) 0%, rgba(14,12,10,0.35) 35%, rgba(14,12,10,0.45) 65%, rgba(14,12,10,0.85) 100%)" }} />
+    </AbsoluteFill>
+  );
 }
 
 /* A big warm disc drifts to a new spot on every scene: geometry, not decoration. */
@@ -191,7 +206,7 @@ function Captions({ scenes }: { scenes: Scene[] }) {
       {chunk.map((w, k) => {
         const on = chunkStart + k === cur && t >= w.s;
         return (
-          <span key={k} style={{ fontFamily: TEXT, fontWeight: 800, fontSize: 66, color: on ? INK : PAPER, background: on ? SUN : "transparent", padding: "2px 14px", borderRadius: 12, transform: `scale(${on ? 1.06 : 1})` }}>
+          <span key={k} style={{ fontFamily: TEXT, fontWeight: 800, fontSize: 66, color: on ? INK : PAPER, background: on ? SUN : "transparent", padding: "2px 14px", borderRadius: 12, transform: `scale(${on ? 1.06 : 1})`, textShadow: on ? "none" : "0 3px 12px rgba(0,0,0,0.8)" }}>
             {w.w}
           </span>
         );
@@ -200,7 +215,7 @@ function Captions({ scenes }: { scenes: Scene[] }) {
   );
 }
 
-export function Reel({ audio, handle, total, scenes }: ReelProps) {
+export function Reel({ audio, handle, lang = "en", total, scenes }: ReelProps) {
   const f = useCurrentFrame();
   const { fps } = useVideoConfig();
   return (
@@ -216,9 +231,10 @@ export function Reel({ audio, handle, total, scenes }: ReelProps) {
         const until = Math.round((next ? next.start : total + 0.6) * fps);
         return (
           <Sequence key={i} from={from} durationInFrames={Math.max(1, until - from)}>
+            {s.video && <Footage src={s.video} frames={until - from} />}
             <ExitFade frames={until - from}>
               <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", padding: "0 70px 420px" }}>
-                <SceneBody scene={s} />
+                <SceneBody scene={s} lang={lang} />
               </AbsoluteFill>
             </ExitFade>
           </Sequence>

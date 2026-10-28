@@ -2,3 +2,4 @@ node_modules
 out/
 work/
 .env*
+public/work/
