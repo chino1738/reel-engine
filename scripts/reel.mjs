@@ -22,7 +22,7 @@ function loadEnv(path) {
 const topic = args.filter((a, i) => !a.startsWith("--") && !(args[i - 1]?.startsWith("--") && !BOOL.has(args[i - 1]))).join(" ").trim();
 const lang = flag("--lang", "en");
 const handle = flag("--handle", lang === "es" ? "@curiosidades" : "@yourhandle");
-const voice = flag("--voice", lang === "es" ? "es-MX-JorgeNeural" : "en-US-AndrewNeural");
+const voice = flag("--voice", lang === "es" ? "es-MX-JorgeNeural" : "en-US-BrianNeural");
 if (!topic) {
   console.error('Give it a topic: npm run reel -- "por qué el cielo es azul"');
   process.exit(1);
@@ -86,7 +86,7 @@ const scenes = script.scenes.map((s, i) => ({ ...s, ...timing.scenes[i] }));
 
 // 3. B-roll: one matching vertical clip per scene from Pexels (free, commercial use allowed).
 step("Finding footage");
-if (!process.env.PEXELS_API_KEY) console.warn("  no PEXELS_API_KEY in .env, rendering without footage");
+if (!process.env.PEXELS_API_KEY && !process.env.PIXABAY_API_KEY) console.warn("  no PEXELS_API_KEY or PIXABAY_API_KEY in .env, rendering without footage");
 else {
   const used = new Set();
   for (const [i, s] of scenes.entries()) {
@@ -101,22 +101,6 @@ else {
     s.credit = clip.credit;
     console.log(`  scene ${i + 1}: "${s.broll}" → pexels ${clip.id} (${(buf.length / 1e6).toFixed(1)} MB)`);
   }
-}
-
-async function findClip(query, used, need) {
-  const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=15&size=medium`;
-  const r = await fetch(url, { headers: { Authorization: process.env.PEXELS_API_KEY } });
-  if (!r.ok) { console.warn(`  pexels ${r.status} for "${query}"`); return null; }
-  const { videos = [] } = await r.json();
-  for (const v of videos) {
-    if (used.has(v.id) || v.duration < need) continue;
-    // smallest file that still fills a 1080-wide frame
-    const f = v.video_files
-      .filter((x) => x.file_type === "video/mp4" && x.height > x.width && x.width >= 720)
-      .sort((a, b) => a.width - b.width)[0];
-    if (f) return { id: v.id, link: f.link, credit: `${v.user?.name ?? "Pexels"} / Pexels` };
-  }
-  return null;
 }
 
 // 4. Render.
@@ -144,3 +128,39 @@ const credits = [...new Set(scenes.map((s) => s.credit).filter(Boolean))];
 const kit = `${script.caption}\n\n${script.hashtags.map((h) => `#${h}`).join(" ")}\n\n--- check before posting (confidence: ${script.confidence}) ---\n${script.sources.map((s) => `• ${s}`).join("\n")}\n${credits.length ? `\nFootage: ${credits.join(", ")}\n` : ""}`;
 writeFileSync(join(ROOT, "out", `${id}.txt`), kit);
 console.log(`\n\n✓ ${outFile}\n✓ ${join(ROOT, "out", `${id}.txt`)}`);
+
+async function findClip(query, used, need) {
+  return process.env.PEXELS_API_KEY ? findPexels(query, used, need) : findPixabay(query, used, need);
+}
+
+async function findPexels(query, used, need) {
+  const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=15&size=medium`;
+  const r = await fetch(url, { headers: { Authorization: process.env.PEXELS_API_KEY } });
+  if (!r.ok) { console.warn(`  pexels ${r.status} for "${query}"`); return null; }
+  const { videos = [] } = await r.json();
+  for (const v of videos) {
+    if (used.has(v.id) || v.duration < need) continue;
+    // smallest file that still fills a 1080-wide frame
+    const f = v.video_files
+      .filter((x) => x.file_type === "video/mp4" && x.height > x.width && x.width >= 720)
+      .sort((a, b) => a.width - b.width)[0];
+    if (f) return { id: v.id, link: f.link, credit: `${v.user?.name ?? "Pexels"} / Pexels` };
+  }
+  return null;
+}
+
+// Pixabay has few vertical clips, so landscape ones get center-cropped to 9:16 by the template.
+async function findPixabay(query, used, need) {
+  const url = `https://pixabay.com/api/videos/?key=${process.env.PIXABAY_API_KEY}&q=${encodeURIComponent(query)}&per_page=20&safesearch=true`;
+  const r = await fetch(url);
+  if (!r.ok) { console.warn(`  pixabay ${r.status} for "${query}"`); return null; }
+  const { hits = [] } = await r.json();
+  const ranked = hits
+    .filter((h) => !used.has(h.id) && h.duration >= need)
+    .sort((a, b) => (b.videos.medium.height > b.videos.medium.width) - (a.videos.medium.height > a.videos.medium.width));
+  for (const h of ranked) {
+    const f = [h.videos.medium, h.videos.large].find((x) => x?.url && Math.min(x.width, x.height) >= 720);
+    if (f) return { id: h.id, link: f.url, credit: `${h.user} / Pixabay` };
+  }
+  return null;
+}
