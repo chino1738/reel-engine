@@ -1,7 +1,7 @@
 // One line in, finished reel out.
 // usage: npm run reel -- "por qué la comida del avión sabe rara" [--handle @cuenta] [--voice es-MX-JorgeNeural]
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
@@ -10,7 +10,8 @@ import { renderMedia, selectComposition } from "@remotion/renderer";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const flag = (n, d) => (args.includes(n) ? args[args.indexOf(n) + 1] : d);
-const topic = args.filter((a, i) => !a.startsWith("--") && !args[i - 1]?.startsWith("--")).join(" ").trim();
+const BOOL = new Set(["--reuse"]);
+const topic = args.filter((a, i) => !a.startsWith("--") && !(args[i - 1]?.startsWith("--") && !BOOL.has(args[i - 1]))).join(" ").trim();
 const handle = flag("--handle", "@curiosidades");
 const voice = flag("--voice", "es-MX-JorgeNeural");
 if (!topic) {
@@ -45,8 +46,15 @@ Reglas:
 - Usa al menos 3 tipos de escena distintos; no repitas "line" más de una vez seguida.
 - Solo hechos bien establecidos. Nada de cifras inventadas: si no estás seguro de un número, no uses escena stat.
 - Explica el porqué de forma simple, como a un amigo. Sin relleno, sin "¿sabías que...?".`;
-const raw = execFileSync("claude", ["-p", "--model", "sonnet", prompt], { encoding: "utf8", maxBuffer: 1 << 24 });
-const script = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+// --reuse re-renders today's existing script and voice (for template tweaks)
+const reuse = args.includes("--reuse") && existsSync(join(work, "timings.json"));
+let script;
+if (reuse) {
+  script = JSON.parse(readFileSync(join(work, "script.json"), "utf8"));
+} else {
+  const raw = execFileSync("claude", ["-p", "--model", "sonnet", prompt], { encoding: "utf8", maxBuffer: 1 << 24 });
+  script = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+}
 const spoken = script.scenes.map((s) => s.say).join(" ").split(/\s+/).length;
 if (spoken > 95) console.warn(`  ⚠ script runs long (${spoken} words); expect 40s+`);
 writeFileSync(join(work, "script.json"), JSON.stringify(script, null, 2));
@@ -56,7 +64,7 @@ console.log(`  "${script.title}" · ${script.scenes.length} scenes · confidence
 step("Recording the voiceover");
 const audioRel = `work/${id}.mp3`;
 const timingPath = join(work, "timings.json");
-execFileSync("python3", [join(ROOT, "scripts/tts.py"), join(work, "script.json"), join(ROOT, "public", audioRel), timingPath, voice], { stdio: "inherit" });
+if (!reuse) execFileSync("python3", [join(ROOT, "scripts/tts.py"), join(work, "script.json"), join(ROOT, "public", audioRel), timingPath, voice], { stdio: "inherit" });
 const timing = JSON.parse(readFileSync(timingPath, "utf8"));
 const scenes = script.scenes.map((s, i) => ({ ...s, ...timing.scenes[i] }));
 
