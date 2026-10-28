@@ -3,3 +3,4 @@ out/
 work/
 .env*
 public/work/
+public/fluent/

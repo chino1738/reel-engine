@@ -1,5 +1,6 @@
 import { Composition } from "remotion";
 import { Reel, FPS, type ReelProps } from "./Reel";
+import { Collage, type CollageProps } from "./Collage";
 
 const sample: ReelProps = {
   audio: "work/test.mp3",
@@ -11,7 +12,20 @@ const sample: ReelProps = {
   ],
 };
 
+const collageSample: CollageProps = { audio: "work/test.mp3", handle: "@yourhandle", total: 9, scenes: [] };
+
 export const Root = () => (
+  <>
+  <Composition
+    id="Collage"
+    component={Collage}
+    fps={FPS}
+    width={1080}
+    height={1920}
+    durationInFrames={Math.ceil(collageSample.total * FPS)}
+    defaultProps={collageSample}
+    calculateMetadata={({ props }) => ({ durationInFrames: Math.ceil((props.total + 0.6) * FPS) })}
+  />
   <Composition
     id="Reel"
     component={Reel}
@@ -22,4 +36,5 @@ export const Root = () => (
     defaultProps={sample}
     calculateMetadata={({ props }) => ({ durationInFrames: Math.ceil((props.total + 0.6) * FPS) })}
   />
+  </>
 );

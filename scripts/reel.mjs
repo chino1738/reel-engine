@@ -21,6 +21,7 @@ function loadEnv(path) {
 }
 const topic = args.filter((a, i) => !a.startsWith("--") && !(args[i - 1]?.startsWith("--") && !BOOL.has(args[i - 1]))).join(" ").trim();
 const lang = flag("--lang", "en");
+const style = flag("--style", "collage"); // collage | footage
 const handle = flag("--handle", lang === "es" ? "@curiosidades" : "@yourhandle");
 const voice = flag("--voice", lang === "es" ? "es-MX-JorgeNeural" : "en-US-BrianNeural");
 if (!topic) {
@@ -29,7 +30,7 @@ if (!topic) {
 }
 
 const slug = topic.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
-const id = `${new Date().toISOString().slice(0, 10)}-${slug}`;
+const id = `${new Date().toISOString().slice(0, 10)}-${slug}${flag("--style", "collage") === "collage" ? "" : "-footage"}`;
 const work = join(ROOT, "work", id);
 mkdirSync(work, { recursive: true });
 mkdirSync(join(ROOT, "out"), { recursive: true });
@@ -51,6 +52,13 @@ const SCENE_TYPES_ES = `Tipos de escena:
 - list: "items" = 2-3 elementos de máx 3 palabras.
 - line: "big" = una idea clave (máx 7 palabras).
 - end: última escena, "say" invita a seguir la cuenta, "big" = "Sígueme para más".`;
+const FLUENT = JSON.parse(readFileSync(join(ROOT, "data/fluent-index.json"), "utf8"));
+const COLLAGE_FIELDS = `Also give every scene:
+- "props": 1-3 objects that literally show what's said, each EXACTLY one name from the OBJECT LIST below (hook: 3 props; compare: 2 props, one per side, in a/b order; list: one per item; others: 1-2).
+- "em": 1-2 words copied exactly from that scene's "say" to highlight (the surprising or key words).
+- "stamp": optional 1-2 word stamp in caps for hook/line/end scenes (e.g. "WHY?", "PLOT TWIST", "NOPE").
+OBJECT LIST:
+${readFileSync(join(ROOT, "data/fluent-names.txt"), "utf8").split("\n").join(" | ")}`;
 const prompt = lang === "es"
   ? `Eres guionista de reels de curiosidades en español latino neutro. Tema: "${topic}".
 Devuelve SOLO un objeto JSON con: "title", "caption" (1-2 frases), "hashtags" (5, sin #), "sources" (2-3 fuentes reales y verificables), "confidence" ("alta"|"media"), "scenes" (lista).
@@ -61,7 +69,8 @@ Reglas: 5 a 6 escenas; todo el "say" junto suma 60-80 palabras (~30 s); cada "sa
 Return ONLY a JSON object with: "title", "caption" (1-2 sentences), "hashtags" (5, no #), "sources" (2-3 real, checkable sources: institution, study or encyclopedia), "confidence" ("high"|"medium"), "scenes" (array).
 Each scene: {"kind", "say", "broll", ...fields for its kind}. "broll" = 2-4 English words to search a stock video clip that literally shows what's being said (e.g. "ocean waves aerial", "airplane meal tray"). Concrete, filmable things only.
 ${SCENE_TYPES_EN}
-Rules: 5-6 scenes; all "say" text together is 60-80 words (~30 s); each "say" is one short, natural sentence. Use at least 3 different scene kinds. Only well-established facts; never invent numbers. Explain the why simply, like to a friend. No filler, no "did you know".`;
+Rules: 5-6 scenes; all "say" text together is 60-80 words (~30 s); each "say" is one short, natural sentence. Use at least 3 different scene kinds. Only well-established facts; never invent numbers. Explain the why simply, like to a friend. No filler, no "did you know".
+${style === "collage" ? COLLAGE_FIELDS : ""}`;
 // --reuse re-renders today's existing script and voice (for template tweaks)
 const reuse = args.includes("--reuse") && existsSync(join(work, "timings.json"));
 let script;
@@ -84,9 +93,38 @@ if (!reuse) execFileSync("python3", [join(ROOT, "scripts/tts.py"), join(work, "s
 const timing = JSON.parse(readFileSync(timingPath, "utf8"));
 const scenes = script.scenes.map((s, i) => ({ ...s, ...timing.scenes[i] }));
 
-// 3. B-roll: one matching vertical clip per scene from Pexels (free, commercial use allowed).
-step("Finding footage");
-if (!process.env.PEXELS_API_KEY && !process.env.PIXABAY_API_KEY) console.warn("  no PEXELS_API_KEY or PIXABAY_API_KEY in .env, rendering without footage");
+// 3a. Collage art: 3D objects + a mascot pose per scene, from Microsoft's MIT-licensed Fluent emoji.
+const POSES = { hook: "Man raising hand", line: "Man detective", stat: "Man tipping hand", compare: "Man shrugging", list: "Man teacher", end: "Man raising hand" };
+if (style === "collage") {
+  step("Pulling 3D art");
+  for (const s of scenes) {
+    s.props = (await Promise.all((s.props ?? []).map((n) => fluentAsset(n)))).filter(Boolean);
+    s.mascot = await fluentAsset(POSES[s.kind] ?? "Man tipping hand", "medium");
+  }
+  console.log(`  ${scenes.map((s) => s.props.length).join("/")} props per scene`);
+}
+
+async function fluentAsset(name, tone) {
+  const keys = Object.keys(FLUENT);
+  const want = (tone ? `${name}|${tone}` : name).toLowerCase();
+  const key = keys.find((k) => k.toLowerCase() === want) ?? (!tone && keys.find((k) => !k.includes("|") && k.toLowerCase().includes(name.toLowerCase())));
+  if (!key) { console.log(`  no 3D art for "${name}"`); return null; }
+  const rel = `fluent/${key.replace("|", "-").toLowerCase().replace(/[^a-z0-9]+/g, "-")}.png`;
+  const abs = join(ROOT, "public", rel);
+  if (!existsSync(abs)) {
+    const url = `https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/${FLUENT[key].split("/").map(encodeURIComponent).join("/")}`;
+    const r = await fetch(url);
+    if (!r.ok) { console.log(`  download failed for "${name}"`); return null; }
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, Buffer.from(await r.arrayBuffer()));
+  }
+  return rel;
+}
+
+// 3b. B-roll: one matching vertical clip per scene (footage style).
+if (style === "footage") step("Finding footage");
+if (style !== "footage") {}
+else if (!process.env.PEXELS_API_KEY && !process.env.PIXABAY_API_KEY) console.warn("  no PEXELS_API_KEY or PIXABAY_API_KEY in .env, rendering without footage");
 else {
   const used = new Set();
   for (const [i, s] of scenes.entries()) {
@@ -107,7 +145,7 @@ else {
 step("Rendering the video");
 const serveUrl = await bundle({ entryPoint: join(ROOT, "src/index.ts"), publicDir: join(ROOT, "public") });
 const inputProps = { audio: audioRel, handle, lang, total: timing.total, scenes };
-const composition = await selectComposition({ serveUrl, id: "Reel", inputProps });
+const composition = await selectComposition({ serveUrl, id: style === "collage" ? "Collage" : "Reel", inputProps });
 const outFile = join(ROOT, "out", `${id}.mp4`);
 let last = -1;
 await renderMedia({
