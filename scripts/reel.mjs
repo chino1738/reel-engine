@@ -22,7 +22,7 @@ function loadEnv(path) {
 const topic = args.filter((a, i) => !a.startsWith("--") && !(args[i - 1]?.startsWith("--") && !BOOL.has(args[i - 1]))).join(" ").trim();
 const lang = flag("--lang", "en");
 const style = flag("--style", "demo"); // demo | collage | footage
-const handle = flag("--handle", lang === "es" ? "@curiosidades" : "@yourhandle");
+const handle = flag("--handle", lang === "es" ? "@curiosidades" : "@bryzdaily");
 // voices he picked 10/28: brian (default) and ava; both Multilingual, tuned for energy
 const VOICES = {
   brian: { id: "en-US-BrianMultilingualNeural", rate: "+18%", pitch: "+3Hz" },
