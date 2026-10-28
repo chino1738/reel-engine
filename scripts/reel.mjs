@@ -223,6 +223,7 @@ await renderMedia({
   composition,
   serveUrl,
   codec: "h264",
+  crf: 23, // about half the size of the default 18; the apps re-encode anyway, and texts send faster
   outputLocation: outFile,
   inputProps,
   concurrency: 2,
