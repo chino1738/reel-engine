@@ -9,6 +9,7 @@ import { ThreeCanvas } from "@remotion/three";
 import { useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useState } from "react";
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { loadFont as loadAnton } from "@remotion/google-fonts/Anton";
 import { loadFont as loadInter } from "@remotion/google-fonts/Inter";
 import { Caption, Chrome, Counter, Statement, sfxFor, type DataProps, type DataScene } from "./Data";
@@ -23,7 +24,8 @@ const WHITE = "#F4F1EA";
 const MUTED = "rgba(244,241,234,0.55)";
 const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
 const GAP = 34; // world units between stations; fog hides the neighbours
-const FLY = 16; // frames the camera spends flying to the next station
+const WHIP = 10; // frames for the whip pan to the next station: hangs, snaps through, settles
+const SLAM = 20; // opening move: the camera rushes in on the hook
 const CURRENCY = /^[$€£¥]$/; // plain cash only: "$B" units are not coins and not cents
 
 const num = (v: number | string | undefined) => Number(String(v ?? 0).replace(/[^0-9.\-]/g, "")) || 0;
@@ -45,13 +47,14 @@ type Timed = DataScene & { from: number; frames: number };
 
 // what's on the pedestal right now: the scene's subject, replaced by each beat as its word is spoken
 function subjectAt(s: Timed, local: number, fps: number) {
-  let src = s.show, since = 0;
+  let src = s.show, since = 0, prev: string | undefined, prevSince = 0;
   for (const b of s.beats ?? []) {
     const at = Math.round((b.at - s.start) * fps);
-    if (local >= at) { src = b.show; since = at; }
+    if (local >= at) { prev = src; prevSince = since; src = b.show; since = at; }
   }
-  return { src, since };
+  return { src, since, prev, prevSince };
 }
+const SWAP_OUT = 7; // frames the outgoing subject takes to spin away
 
 /* ── Camera: orbit the active station, fly between stations ── */
 
@@ -83,11 +86,13 @@ function activeAt(scenes: Timed[], f: number) {
 }
 
 /* Frames where something lands hard: the camera kicks and the light flashes. */
+// a subject swap lands ~7 frames after its word (the drop-in), and the camera punches on it
+const beatImpacts = (s: Timed, fps: number) => (s.beats ?? []).map((b) => ({ at: Math.round((b.at - s.start) * fps) + 7, amp: 0.5 }));
 function impactsOf(s: Timed, fps: number): { at: number; amp: number }[] {
-  if ((s.kind === "count" || s.kind === "hook") && s.value !== undefined) return [{ at: landOf(s, fps), amp: 1 }];
+  if ((s.kind === "count" || s.kind === "hook") && s.value !== undefined) return [{ at: landOf(s, fps), amp: 1 }, ...beatImpacts(s, fps)];
   if (s.kind === "bars") return (s.items ?? []).slice(0, 4).map((_, i) => ({ at: barDelay(s.frames, i) + 10, amp: i === 0 ? 0.7 : 0.45 }));
   if (s.kind === "scale") return [{ at: Math.round(s.frames * 0.5) + 8, amp: 0.9 }];
-  return [];
+  return beatImpacts(s, fps);
 }
 const KICK = 12;
 function kickAt(s: Timed, local: number, fps: number) {
@@ -103,12 +108,26 @@ function cameraAt(scenes: Timed[], f: number, fps: number) {
   const i = activeAt(scenes, f);
   const local = f - scenes[i].from;
   let { pos, look } = pose(scenes[i], i, local);
-  if (i > 0 && local < FLY) {
+  let roll = 0, whip = 0;
+  if (i > 0 && local < WHIP) {
+    // whip pan: exponential in/out so it hangs, snaps through the middle, and settles; blur follows the speed
     const prev = pose(scenes[i - 1], i - 1, scenes[i - 1].frames);
-    const t = Easing.inOut(Easing.cubic)(local / FLY);
+    const ease = Easing.inOut(Easing.exp);
+    const u = local / WHIP;
+    const t = ease(u);
     pos = prev.pos.clone().lerp(pos, t);
     look = prev.look.clone().lerp(look, t);
-    pos.y += Math.sin(t * Math.PI) * 2.5; // a little lift mid-flight
+    pos.y += Math.sin(t * Math.PI) * 1.2;
+    const dir = i % 2 ? 1 : -1;
+    roll = Math.sin(u * Math.PI) * 0.12 * dir;
+    whip = Math.min(1, (ease(Math.min(1, u + 1 / WHIP)) - t) * WHIP / 3.5);
+  } else if (i === 0 && local < SLAM) {
+    // cold open: rush in from far and high, a little rolled, landing on the hook
+    const t = Easing.out(Easing.exp)(local / SLAM);
+    const far = pos.clone().sub(look).multiplyScalar(1.9).add(look);
+    far.y += 5;
+    pos = far.lerp(pos, t);
+    roll = (1 - t) * -0.18;
   }
   // handheld drift so the camera never feels locked off
   pos.x += Math.sin(f / 37) * 0.09;
@@ -119,13 +138,14 @@ function cameraAt(scenes: Timed[], f: number, fps: number) {
     pos.x += Math.sin(age * 2.7) * 0.22 * k;
     pos.y += Math.cos(age * 3.3) * 0.15 * k;
   }
-  return { pos, look, flash: k };
+  return { pos, look, flash: k, roll, whip };
 }
 
-function Rig({ pos, look }: { pos: THREE.Vector3; look: THREE.Vector3 }) {
+function Rig({ pos, look, roll }: { pos: THREE.Vector3; look: THREE.Vector3; roll: number }) {
   const camera = useThree((s) => s.camera);
   camera.position.copy(pos);
   camera.lookAt(look);
+  camera.rotateZ(roll);
   return null;
 }
 
@@ -215,6 +235,43 @@ function useTexture(src?: string) {
   return tex;
 }
 
+// Real 3D models (.glb). Models come from different artists, so every mesh gets the same material
+// response; that's what makes a reel read as one art direction instead of a pile of assets.
+function normalizeModel(root: THREE.Object3D) {
+  const box = new THREE.Box3().setFromObject(root);
+  const dim = box.getSize(new THREE.Vector3());
+  const c = box.getCenter(new THREE.Vector3());
+  const k = 1 / Math.max(dim.x, dim.y, dim.z, 1e-6);
+  root.scale.setScalar(k);
+  root.position.set(-c.x * k, -box.min.y * k, -c.z * k);
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    m.castShadow = true;
+    m.receiveShadow = true;
+    const restyle = (src: THREE.Material) => {
+      const old = src as THREE.MeshStandardMaterial;
+      return new THREE.MeshStandardMaterial({ color: old.color ?? new THREE.Color("#ffffff"), map: old.map ?? null, vertexColors: !!m.geometry.attributes.color, roughness: 0.5, metalness: 0.06, envMapIntensity: 0.6 });
+    };
+    m.material = Array.isArray(m.material) ? m.material.map(restyle) : restyle(m.material);
+  });
+  const g = new THREE.Group();
+  g.add(root);
+  return g;
+}
+
+function useModel(src?: string) {
+  const [obj, setObj] = useState<THREE.Object3D | null>(null);
+  const [handle] = useState(() => (src ? delayRender(`model ${src}`) : null));
+  useEffect(() => {
+    if (!src || handle === null) return;
+    new GLTFLoader().load(staticFile(src), (g) => { setObj(normalizeModel(g.scene)); continueRender(handle); }, undefined, () => continueRender(handle));
+  }, [src, handle]);
+  return obj;
+}
+
+const isModel = (src?: string) => !!src && src.endsWith(".glb");
+
 /* ── Station pieces ── */
 
 function Coin({ x = 0, y, z = 0, tilt = 0, spin = 0, hero = true, r = 0.8 }: { x?: number; y: number; z?: number; tilt?: number; spin?: number; hero?: boolean; r?: number }) {
@@ -280,14 +337,24 @@ function Pins({ s, local, color }: { s: Timed; local: number; color: string }) {
   );
 }
 
-function Pedestal({ src, local, x = 0, size = 3.4, cam, world }: { src?: string; local: number; x?: number; size?: number; cam: THREE.Vector3; world: [number, number] }) {
+function Pedestal({ src, local, x = 0, size = 3.4, cam, world, out = 0 }: { src?: string; local: number; x?: number; size?: number; cam: THREE.Vector3; world: [number, number]; out?: number }) {
   const { fps } = useVideoConfig();
-  const tex = useTexture(src);
-  const p = spring({ frame: local - 3, fps, config: { damping: 10, mass: 0.6, stiffness: 150 } });
-  const bob = Math.sin(local / 14) * 0.12;
-  // the art always turns to face the camera, with a slow sway so it feels alive
-  const yaw = Math.atan2(cam.x - (world[0] + x), cam.z - world[1]) + Math.sin(local / 30) * 0.12;
-  const cy = 0.6 + size / 2 + 0.15 + bob + (1 - p) * 3;
+  const model = isModel(src);
+  const tex = useTexture(model ? undefined : src);
+  const obj = useModel(model ? src : undefined);
+  // entrance: falls in spinning and squashes on the pedestal; `out` (0→1) spins it up and away
+  const fall = spring({ frame: local, fps, config: { damping: 13, mass: 0.7, stiffness: 140 } });
+  const land = local - 7;
+  const squash = land >= 0 && land < 12 ? Math.sin((land / 12) * Math.PI) * Math.exp(-land / 5) * 0.25 : 0;
+  const grow = interpolate(local, [0, 5], [0.4, 1], clamp) * (1 - Easing.in(Easing.cubic)(out));
+  const bob = model ? 0 : Math.sin(local / 14) * 0.12;
+  const base = 0.75 + bob + (1 - fall) * 4.5 + out * 3;
+  // sprites face the camera (they're flat) and only wobble in; models spin a full turn and keep turning
+  const face = Math.atan2(cam.x - (world[0] + x), cam.z - world[1]);
+  const yaw = model
+    ? face + (1 - fall) * Math.PI * 2 + local * 0.012 + out * Math.PI
+    : face + Math.sin(local / 30) * 0.12 + (1 - fall) * 0.9 + out * 1.2;
+  const sx = grow * (1 + squash * 0.7), sy = grow * (1 - squash);
   return (
     <group position={[x, 0, 0]}>
       <mesh position={[0, 0.3, 0]} castShadow receiveShadow>
@@ -298,16 +365,22 @@ function Pedestal({ src, local, x = 0, size = 3.4, cam, world }: { src?: string;
         <ringGeometry args={[1.45, 1.6, 64]} />
         <meshStandardMaterial color={GOLD} emissive={GOLD} emissiveIntensity={0.9} />
       </mesh>
-      {tex && (
-        <group position={[0, cy, 0]} rotation={[0, yaw, (1 - p) * -0.4]} scale={[p, p, p]}>
-          <mesh position={[0, 0, -0.08]}>
-            <circleGeometry args={[size * 0.85, 64]} />
-            <Glow kind="disc" color={GOLD} opacity={0.32 + Math.sin(local / 10) * 0.05} />
-          </mesh>
-          <mesh castShadow>
-            <planeGeometry args={[size, size]} />
-            <meshStandardMaterial map={tex} transparent alphaTest={0.4} roughness={0.9} emissive="#ffffff" emissiveMap={tex} emissiveIntensity={0.4} side={THREE.DoubleSide} />
-          </mesh>
+      {(tex || obj) && (
+        <group position={[0, base, 0]} rotation={[0, yaw, 0]} scale={[sx, sy, sx]}>
+          {obj ? (
+            <primitive object={obj} scale={size} />
+          ) : (
+            <group position={[0, size / 2, 0]}>
+              <mesh position={[0, 0, -0.08]}>
+                <circleGeometry args={[size * 0.85, 64]} />
+                <Glow kind="disc" color={GOLD} opacity={0.32 + Math.sin(local / 10) * 0.05} />
+              </mesh>
+              <mesh castShadow>
+                <planeGeometry args={[size, size]} />
+                <meshStandardMaterial map={tex} transparent alphaTest={0.4} roughness={0.9} emissive="#ffffff" emissiveMap={tex} emissiveIntensity={0.4} side={THREE.DoubleSide} />
+              </mesh>
+            </group>
+          )}
         </group>
       )}
     </group>
@@ -403,11 +476,14 @@ function Station({ s, local, cam, ox }: { s: Timed; local: number; cam: THREE.Ve
   let body: React.ReactNode;
   if ((s.kind === "count" || s.kind === "hook") && s.value !== undefined)
     body = asCoins(s)
-      ? <><group position={[0.9, 0, 2]}><CoinStack s={s} local={local} /></group>{subj.src && <group position={[-1.3, 0, -3]}><Pedestal key={subj.src} src={subj.src} local={local - subj.since + (subj.since ? 3 : 0)} size={2.8} cam={cam} world={[ox - 1.3, -3]} /></group>}</>
-      : <><Pins s={s} local={local} color={s.kind === "hook" ? RED : GOLD} />{subj.src && <Pedestal key={subj.src} src={subj.src} local={local - subj.since + (subj.since ? 3 : 0)} size={2.8} cam={cam} world={[ox, 0]} />}</>;
+      ? <><group position={[0.9, 0, 2]}><CoinStack s={s} local={local} /></group>{subj.src && <group position={[-1.3, 0, -3]}><Pedestal key={subj.src} src={subj.src} local={local - subj.since} size={2.8} cam={cam} world={[ox - 1.3, -3]} /></group>}</>
+      : <><Pins s={s} local={local} color={s.kind === "hook" ? RED : GOLD} />{subj.src && <Pedestal key={subj.src} src={subj.src} local={local - subj.since} size={2.8} cam={cam} world={[ox, 0]} />}</>;
   else if (s.kind === "bars") body = <Bars s={s} local={local} />;
   else if (s.kind === "scale") body = <Scale s={s} local={local} cam={cam} ox={ox} />;
-  else body = <Pedestal key={subj.src} src={subj.src} local={local - subj.since + (subj.since ? 3 : 0)} cam={cam} world={[ox, 0]} />;
+  else body = <>
+    <Pedestal key={subj.src} src={subj.src} local={local - subj.since} cam={cam} world={[ox, 0]} />
+    {subj.prev && local - subj.since < SWAP_OUT && <Pedestal key={`out-${subj.prev}`} src={subj.prev} local={local - subj.prevSince + 30} out={(local - subj.since) / SWAP_OUT} cam={cam} world={[ox, 0]} />}
+  </>;
   return <>{body}{shocks}</>;
 }
 
@@ -422,7 +498,7 @@ function World({ scenes }: { scenes: Timed[] }) {
     <>
       <color attach="background" args={[BG]} />
       <fog attach="fog" args={[BG, 14, 30]} />
-      <Rig pos={cam.pos} look={cam.look} />
+      <Rig pos={cam.pos} look={cam.look} roll={cam.roll} />
       <primitive object={target} />
       <hemisphereLight args={["#FFF4E0", "#0A0D13", 0.8]} />
       <LightRig x={cam.look.x} target={target} flash={cam.flash} />
@@ -505,14 +581,21 @@ function Grade() {
 
 export function Reel3D({ audio, handle, total, scenes }: DataProps) {
   const { fps } = useVideoConfig();
+  const frame = useCurrentFrame();
   const timed: Timed[] = scenes.map((s, i) => {
     const from = Math.round(s.start * fps);
     const until = Math.round((scenes[i + 1] ? scenes[i + 1].start : total + 0.6) * fps);
     return { ...s, from, frames: Math.max(1, until - from) };
   });
+  // horizontal-only blur while the camera whips: a real smear, not a soft focus (only ~8 frames per cut)
+  const blur = cameraAt(timed, frame, fps).whip * 34;
   return (
     <AbsoluteFill style={{ background: BG }}>
       <Audio src={staticFile(audio)} />
+      <svg width={0} height={0} style={{ position: "absolute" }}>
+        <filter id="whip" x="-5%" y="0" width="110%" height="100%"><feGaussianBlur stdDeviation={`${blur.toFixed(1)} 0`} edgeMode="duplicate" /></filter>
+      </svg>
+      <AbsoluteFill style={{ filter: blur > 0.6 ? "url(#whip)" : undefined }}>
       <ThreeCanvas width={1080} height={1920} shadows camera={{ fov: 38, near: 0.1, far: 120 }}>
         <World scenes={timed} />
       </ThreeCanvas>
@@ -523,11 +606,15 @@ export function Reel3D({ audio, handle, total, scenes }: DataProps) {
           <Overlay s={s} />
           <Caption scene={s} />
           {i > 0 && <Sequence from={-2} durationInFrames={14} layout="none"><Audio src={staticFile("sfx/whoosh.wav")} volume={0.3} /></Sequence>}
+          {(s.beats ?? []).map((b, k) => (
+            <Sequence key={`b${k}`} from={Math.max(0, Math.round((b.at - s.start) * fps) + 6)} durationInFrames={16} layout="none"><Audio src={staticFile("sfx/pop.wav")} volume={0.32} /></Sequence>
+          ))}
           {sfxFor(s, fps).map((x, k) => (
             <Sequence key={k} from={Math.max(0, x.at)} durationInFrames={16} layout="none"><Audio src={staticFile(`sfx/${x.src}.wav`)} volume={x.vol} /></Sequence>
           ))}
         </Sequence>
       ))}
+      </AbsoluteFill>
       <Grade />
       <Chrome scenes={scenes} total={total} handle={handle} />
     </AbsoluteFill>

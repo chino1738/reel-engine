@@ -10,6 +10,10 @@ import { uploadShort } from "./youtube.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FFMPEG = process.env.FFMPEG ?? join(process.env.HOME, "projects/voice-claude-app/bin/ffmpeg");
+// Poly Pizza model picks + misses (see modelAsset)
+const MODELS_IDX = join(ROOT, "data", "models.json");
+const modelIdx = existsSync(MODELS_IDX) ? JSON.parse(readFileSync(MODELS_IDX, "utf8")) : {};
+const modelCredits = [];
 const args = process.argv.slice(2);
 const flag = (n, d) => (args.includes(n) ? args[args.indexOf(n) + 1] : d);
 const BOOL = new Set(["--reuse", "--revoice", "--auto", "--deliver", "--focus"]);
@@ -131,7 +135,8 @@ Return ONLY a JSON object with: "title", "caption" (1-2 sentences), "hashtags" (
 Each scene: {"kind", "say", "broll", ...fields for its kind}. "broll" = 2-4 English words to search a stock video clip that literally shows what's being said (e.g. "ocean waves aerial", "airplane meal tray"). Concrete, filmable things only.
 ${dataLike ? DATA_KINDS : SCENE_TYPES_EN}
 ${args.includes("--auto") ? `Lane: ${lane.name}. ${lane.rule}\n` : ""}Rules: 5-6 scenes; all "say" text together is 60-80 words (~30 s); each "say" is one short, natural sentence. Use at least 3 different scene kinds. Only well-established facts; never invent numbers. Sound like an excited friend who just learned this: punchy, contractions, an exclamation point or a "here's the crazy part" beat where it fits, but never fake hype words like "insane" or "mind-blowing". Explain the why simply. No filler, no "did you know".
-${style === "collage" ? COLLAGE_FIELDS : style === "demo" ? DEMO_FIELDS : ""}`;
+${style === "collage" ? COLLAGE_FIELDS : style === "demo" ? DEMO_FIELDS : ""}
+${style === "3d" ? `Also give every "show" (scene, beat, scale side) a "model": 1-2 plain English nouns to search a 3D model library for that same physical thing ("hand", "brain", "car tire", "shopping cart"). Concrete objects only, no faces or abstract ideas.` : ""}`;
 // --reuse re-renders today's existing script and voice (for template tweaks)
 const reuse = args.includes("--reuse") && existsSync(join(work, "timings.json"));
 let script;
@@ -192,20 +197,21 @@ if (dataLike) {
     const i = s.words.findIndex((w, k) => k >= from && t && (norm(w.w) === t || (norm(w.w).length > 3 && (norm(w.w).startsWith(t) || t.startsWith(norm(w.w))))));
     return i;
   };
+  const art = async (show, model) => (style === "3d" && (await modelAsset(model ?? show))) || (show ? await fluentAsset(show) : null);
   for (const s of scenes) {
-    s.show = s.show ? await fluentAsset(s.show) : undefined;
+    s.show = s.show ? await art(s.show, s.model) : undefined;
     // beats: subject swaps timed to the word that names them (cursor keeps them in spoken order)
     const beats = [];
     let cursor = 0;
     for (const b of s.beats ?? []) {
-      const asset = b.show ? await fluentAsset(b.show) : undefined;
+      const asset = b.show ? await art(b.show, b.model) : undefined;
       const wi = wordTime(s, b.on, cursor);
       if (!asset || wi < 0) continue;
       cursor = wi + 1;
       beats.push({ at: s.words[wi].s, show: asset });
     }
     s.beats = beats;
-    for (const side of [s.left, s.right]) if (side?.show) side.show = await fluentAsset(side.show);
+    for (const side of [s.left, s.right]) if (side?.show) side.show = await art(side.show, side.model);
     if (s.value === undefined) continue;
     const targets = [s.on, s.value].filter(Boolean).map(norm);
     const w = s.words.find((w) => targets.some((t) => t && (norm(w.w) === t || norm(w.w).replace(/[,]/g, "") === t.replace(/[,]/g, ""))));
@@ -219,6 +225,39 @@ if (style === "collage") {
     s.mascot = await fluentAsset(POSES[s.kind] ?? "Man tipping hand", "medium");
   }
   console.log(`  ${scenes.map((s) => s.props.length).join("/")} props per scene`);
+}
+
+// Real 3D models from Poly Pizza (free low-poly library, CC0 / CC-BY). Needs POLY_PIZZA_KEY in .env;
+// without it, or with no good match, the Fluent sprite is used. Picks and misses are cached in data/models.json.
+async function modelAsset(query) {
+  if (!process.env.POLY_PIZZA_KEY || !query) return null;
+  const q = query.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").trim();
+  if (!(q in modelIdx)) {
+    modelIdx[q] = null;
+    try {
+      const r = await fetch(`https://api.poly.pizza/v1.1/search/${encodeURIComponent(q)}?Limit=16`, { headers: { "x-auth-token": process.env.POLY_PIZZA_KEY } });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const words = q.split(" ");
+      // title must actually be the thing; prefer CC0, static models, sane triangle counts
+      const pick = ((await r.json()).results ?? [])
+        .filter((m) => m.Download && words.every((w) => String(m.Title ?? "").toLowerCase().includes(w)) && !m.Animated)
+        .map((m) => ({ m, score: (/cc0|public/i.test(m.Licence ?? "") ? 2 : 0) + (m["Tri Count"] > 200 && m["Tri Count"] < 40000 ? 1 : 0) - String(m.Title).split(" ").length * 0.1 }))
+        .sort((a, b) => b.score - a.score)[0]?.m;
+      if (pick) {
+        const rel = `models/${q.replace(/ /g, "-")}-${pick.ID}.glb`;
+        const glb = await fetch(pick.Download);
+        if (!glb.ok) throw new Error(`download HTTP ${glb.status}`);
+        mkdirSync(join(ROOT, "public", "models"), { recursive: true });
+        writeFileSync(join(ROOT, "public", rel), Buffer.from(await glb.arrayBuffer()));
+        modelIdx[q] = { file: rel, title: pick.Title, by: pick.Creator?.Username ?? "unknown", licence: pick.Licence ?? "" };
+      }
+    } catch (e) { console.log(`  model search failed for "${q}": ${e.message}`); delete modelIdx[q]; }
+    writeFileSync(MODELS_IDX, JSON.stringify(modelIdx, null, 2));
+  }
+  const hit = modelIdx[q];
+  if (!hit || !existsSync(join(ROOT, "public", hit.file))) return null;
+  if (!/cc0|public/i.test(hit.licence)) modelCredits.push(`"${hit.title}" by ${hit.by} (${hit.licence}) via Poly Pizza`);
+  return hit.file;
 }
 
 async function fluentAsset(name, tone) {
@@ -303,8 +342,8 @@ step("Mastering audio");
 }
 
 // 5. Post kit: caption, hashtags, and sources to double-check before posting.
-const credits = [...new Set(scenes.map((s) => s.credit).filter(Boolean))];
-const kit = `${script.caption}\n\n${script.hashtags.map((h) => `#${h}`).join(" ")}\n\n--- check before posting (confidence: ${script.confidence}) ---\n${script.sources.map((s) => `• ${s}`).join("\n")}\n${credits.length ? `\nFootage: ${credits.join(", ")}\n` : ""}\nDisclosure line for the caption: Narration is AI-generated; graphics are illustrations.\n`;
+const credits = [...new Set([...scenes.map((s) => s.credit), ...modelCredits].filter(Boolean))];
+const kit = `${script.caption}\n\n${script.hashtags.map((h) => `#${h}`).join(" ")}\n\n--- check before posting (confidence: ${script.confidence}) ---\n${script.sources.map((s) => `• ${s}`).join("\n")}\n${credits.length ? `\nCredits: ${credits.join(", ")}\n` : ""}\nDisclosure line for the caption: Narration is AI-generated; graphics are illustrations.\n`;
 writeFileSync(join(ROOT, "out", `${id}.txt`), kit);
 console.log(`\n\n✓ ${outFile}\n✓ ${join(ROOT, "out", `${id}.txt`)}`);
 

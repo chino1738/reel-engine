@@ -6,3 +6,4 @@ public/work/
 public/fluent/
 logs/
 !.env.example
+public/models/
