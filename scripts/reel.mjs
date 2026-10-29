@@ -1,6 +1,6 @@
 // One line in, finished reel out.
 // usage: npm run reel -- "por qué la comida del avión sabe rara" [--handle @cuenta] [--voice es-MX-JorgeNeural]
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import { renderMedia, selectComposition } from "@remotion/renderer";
 import { uploadShort } from "./youtube.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const FFMPEG = process.env.FFMPEG ?? join(process.env.HOME, "projects/voice-claude-app/bin/ffmpeg");
 const args = process.argv.slice(2);
 const flag = (n, d) => (args.includes(n) ? args[args.indexOf(n) + 1] : d);
 const BOOL = new Set(["--reuse", "--revoice", "--auto", "--deliver", "--focus"]);
@@ -38,7 +39,8 @@ if (args.includes("--auto")) {
   const pick = execFileSync("claude", ["-p", "--model", "sonnet",
     `Pick ONE specific, highly clickable short-video topic. Lane: ${lane.brief}. ${lane.rule}
 Already done (never repeat or closely overlap): ${history.map((h) => h.topic).join(" | ") || "none"}.
-Return ONLY the topic as a short phrase, no quotes, no punctuation at the end.`], { encoding: "utf8" }).trim().split("\n").pop();
+Phrase it as the single question the video answers, max 9 words (e.g. "Why fingers wrinkle in water"). One idea only: no "and", no "but also".
+Return ONLY the topic, no quotes, no punctuation at the end.`], { encoding: "utf8" }).trim().split("\n").pop();
   topic = pick;
   console.log(`▸ Lane "${lane.name}" → ${topic}`);
 }
@@ -106,14 +108,16 @@ OBJECT LIST:
 ${readFileSync(join(ROOT, "data/fluent-names.txt"), "utf8").split("\n").join(" | ")}`;
 const DATA_KINDS = `THIS IS A STAT-FLIP REEL: the numbers are the visuals. Story arc: a surprising or bad-sounding number → "sounds bad/weird, until you see why" → the number that flips it → the real reason → end on a question.
 Scene kinds:
-- hook: first scene. "big" = on-screen words (max 6). If the hook states a number, also give "value" (the number only, e.g. 3628 or 1.50), optional "prefix" ("$"), "suffix" ("%", "B", " times"), "on" (the word in "say" where the number is spoken).
-- count: one hero number that ticks up. "value", optional "prefix"/"suffix", "label" (what it is, max 6 words), "on" (word in "say" where the number is spoken), "pins": true if it counts events/things (shows markers popping), false for prices/percentages.
+- hook: first scene. Opens the curiosity gap in the first 1.5 seconds. "big" = on-screen words (max 5). If the hook states a number, also give "value" (the number only, e.g. 3628 or 1.50), optional "prefix" ("$"), "suffix" ("%", "B", " times"), "on" (the word in "say" where the number is spoken).
+- count: one hero number that ticks up. "value", optional "prefix"/"suffix", "label" (what it is, max 6 words), "on" (word in "say" where the number is spoken), "pins": true ONLY if it counts physical things or events you could line up (people, stores, crashes); false for times, prices, percentages, sizes.
 - bars: compare 2-4 things on one measure. "items": [{"label": max 2 words, "value": number}] (years or dates: oldest to newest, left to right; otherwise main subject first; the biggest value is lit gold), "unit" (optional, e.g. "%" or "B"), "label" (what's measured, max 5 words).
-- scale: one thing vs another (or vs "everyone else combined"). "left": {"label","value"}, "right": {"label","value"}, "label" (max 5 words).
+- scale: one thing vs another (or vs "everyone else combined"). "left": {"label","value","show"}, "right": {"label","value","show"} ("show" = that side's object from the OBJECT LIST), "label" (max 5 words). Only when the two values really differ.
 - line: "big" = the key idea/reason, max 6 words.
 - end: last scene. "say" asks a question that makes people comment, then invites a follow. "big" = the question, max 6 words.
-Also every scene: "em": 1-2 words copied exactly from its "say" to highlight, and "show": the scene's subject as EXACTLY one name from the OBJECT LIST below (the literal thing being talked about, e.g. the product, place, or a reaction like "Thinking face" for the reason).
-Rules: 5-6 scenes, at least 2 of count/bars/scale, at most ONE line scene. EVERY number must be real and come from your sources; if you can't source a number, don't use it. "value" fields are plain numbers. Money: put the symbol in "prefix" (count) or "unit" (bars), e.g. "$".
+Also every scene: "em": 1-2 words copied exactly from its "say" to highlight; "show": the scene's subject as EXACTLY one name from the OBJECT LIST below; and "beats": [{"on": one exact word from "say", "show": OBJECT LIST name}] = extra subjects that pop in ON the word that names them.
+VISUALS MUST MATCH THE WORDS. "show" and every beat are the literal thing being said ("tire treads" → a wheel, "blood vessels" → a drop of blood, "Costco" → a shopping cart), never a stand-in. Reaction faces (Thinking face, raised eyebrow…) at most ONCE per reel, and only for the end question. Nothing on screen may sit still for more than ~3 seconds: every scene over 10 words needs at least 1 beat, over 18 words needs 2. Beats go on the KEY nouns of the idea, never on incidental words (in "your fingers wrinkle in water" the subject is fingers: don't swap to water).
+NUMBERS MUST EARN THEIR PLACE. Use count/bars/scale only for a number that surprises or explains (a price, a time, a size, a share people get wrong). Never count obvious things (fingers, days in a week, legs on a dog), never compare two equal values, never restate a number already shown. One strong number beats three weak ones; if the topic has only one, use line scenes with beats for the rest.
+Rules: 5-6 scenes, at most TWO line scenes. EVERY number must be real and come from your sources; if you can't source a number, don't use it. "value" fields are plain numbers. Money: put the symbol in "prefix" (count) or "unit" (bars), e.g. "$".
 OBJECT LIST:
 ${readFileSync(join(ROOT, "data/fluent-names.txt"), "utf8").split("\n").join(" | ")}`;
 const prompt = lang === "es"
@@ -183,8 +187,25 @@ if (style === "demo") {
 if (dataLike) {
   // the count lands on the word where the number is spoken
   const norm = (w) => String(w).toLowerCase().replace(/[^a-z0-9.%$]/g, "").replace(/^\$/, "");
+  const wordTime = (s, on, from = 0) => {
+    const t = norm(on ?? "");
+    const i = s.words.findIndex((w, k) => k >= from && t && (norm(w.w) === t || (norm(w.w).length > 3 && (norm(w.w).startsWith(t) || t.startsWith(norm(w.w))))));
+    return i;
+  };
   for (const s of scenes) {
     s.show = s.show ? await fluentAsset(s.show) : undefined;
+    // beats: subject swaps timed to the word that names them (cursor keeps them in spoken order)
+    const beats = [];
+    let cursor = 0;
+    for (const b of s.beats ?? []) {
+      const asset = b.show ? await fluentAsset(b.show) : undefined;
+      const wi = wordTime(s, b.on, cursor);
+      if (!asset || wi < 0) continue;
+      cursor = wi + 1;
+      beats.push({ at: s.words[wi].s, show: asset });
+    }
+    s.beats = beats;
+    for (const side of [s.left, s.right]) if (side?.show) side.show = await fluentAsset(side.show);
     if (s.value === undefined) continue;
     const targets = [s.on, s.value].filter(Boolean).map(norm);
     const w = s.words.find((w) => targets.some((t) => t && (norm(w.w) === t || norm(w.w).replace(/[,]/g, "") === t.replace(/[,]/g, ""))));
@@ -266,6 +287,21 @@ await renderMedia({
   },
 });
 
+// 4b. Master the audio. Raw TTS + SFX lands around -19 LUFS, ~5 dB quieter than the feed; social
+// platforms play at -14. Low cut + gentle compression first so the voice sits forward, then two-pass loudnorm.
+step("Mastering audio");
+{
+  const chain = "highpass=f=70,acompressor=threshold=-20dB:ratio=2.5:attack=8:release=120:makeup=1.5";
+  const probe = spawnSync(FFMPEG, ["-hide_banner", "-i", outFile, "-af", `${chain},loudnorm=I=-14:TP=-1.5:LRA=9:print_format=json`, "-f", "null", "-"], { encoding: "utf8" }).stderr;
+  const m = JSON.parse(probe.slice(probe.lastIndexOf("{"), probe.lastIndexOf("}") + 1));
+  const mastered = outFile.replace(/\.mp4$/, ".master.mp4");
+  execFileSync(FFMPEG, ["-loglevel", "error", "-y", "-i", outFile, "-c:v", "copy", "-af",
+    `${chain},loudnorm=I=-14:TP=-1.5:LRA=9:measured_I=${m.input_i}:measured_TP=${m.input_tp}:measured_LRA=${m.input_lra}:measured_thresh=${m.input_thresh}:offset=${m.target_offset}:linear=true`,
+    "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", mastered]);
+  execFileSync("mv", [mastered, outFile]);
+  console.log(`  ${(+m.input_i).toFixed(1)} → -14 LUFS`);
+}
+
 // 5. Post kit: caption, hashtags, and sources to double-check before posting.
 const credits = [...new Set(scenes.map((s) => s.credit).filter(Boolean))];
 const kit = `${script.caption}\n\n${script.hashtags.map((h) => `#${h}`).join(" ")}\n\n--- check before posting (confidence: ${script.confidence}) ---\n${script.sources.map((s) => `• ${s}`).join("\n")}\n${credits.length ? `\nFootage: ${credits.join(", ")}\n` : ""}\nDisclosure line for the caption: Narration is AI-generated; graphics are illustrations.\n`;
@@ -285,7 +321,7 @@ if (args.includes("--deliver")) {
   // Grain makes 3D renders ~48MB; a 5.5 Mbps copy (~20MB) texts much faster and the apps re-encode anyway.
   const phoneFile = outFile.replace(/\.mp4$/, "-phone.mp4");
   try {
-    execFileSync(process.env.FFMPEG ?? join(process.env.HOME, "projects/voice-claude-app/bin/ffmpeg"), ["-loglevel", "error", "-y", "-i", outFile,
+    execFileSync(FFMPEG, ["-loglevel", "error", "-y", "-i", outFile,
       "-c:v", "libx264", "-preset", "slow", "-b:v", "5500k", "-maxrate", "6500k", "-bufsize", "11000k", "-pix_fmt", "yuv420p",
       "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", phoneFile]);
   } catch { execFileSync("cp", [outFile, phoneFile]); }

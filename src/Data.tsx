@@ -25,7 +25,7 @@ const SLATE = "#4A5468";
 const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
 
 type Word = { w: string; s: number; e: number };
-type Item = { label: string; value: number | string };
+type Item = { label: string; value: number | string; show?: string };
 export type DataScene = {
   kind: "hook" | "count" | "bars" | "scale" | "line" | "end";
   say: string;
@@ -41,6 +41,7 @@ export type DataScene = {
   pins?: boolean;
   show?: string; // resolved Fluent 3D image in public/
   hit?: number; // seconds: when the number is spoken, so the count lands on it
+  beats?: { at: number; show: string }[]; // subject swaps, timed to the word that names them (seconds)
   items?: Item[];
   unit?: string;
   left?: Item;
@@ -345,21 +346,44 @@ export function Statement({ text, y = 760, size = 128, accent = GOLD }: { text: 
   );
 }
 
-/* ── Caption: spoken words land one by one; key words go gold serif ── */
+/* ── Caption: one short phrase at a time, the spoken word lights up, key words go gold serif ── */
+
+// ≤5 words per phrase, breaking at punctuation, so the eye reads one beat at a time instead of a paragraph.
+// TTS word timings drop punctuation, so it's read from the script text when the word counts line up.
+function phrases(words: Word[], say: string) {
+  const toks = say.split(/\s+/).filter(Boolean);
+  const punct = (i: number) => /[.,!?;:\u2014]$/.test(toks.length === words.length ? toks[i] : words[i].w);
+  const out: Word[][] = [];
+  let cur: Word[] = [];
+  for (const [i, w] of words.entries()) {
+    cur.push(w);
+    if (cur.length >= 5 || (punct(i) && cur.length >= 2)) { out.push(cur); cur = []; }
+  }
+  if (cur.length === 1 && out.length) out[out.length - 1].push(cur[0]);
+  else if (cur.length) out.push(cur);
+  return out;
+}
 
 export function Caption({ scene }: { scene: DataScene }) {
   const f = useCurrentFrame();
   const t = scene.start + f / FPS;
-  const em = new Set([scene.em ?? []].flat().map((w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "")));
+  const em = new Set([scene.em ?? []].flat().flatMap((w) => w.split(/\s+/)).map((w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "")));
   const words = scene.words.length ? scene.words : scene.say.split(" ").map((w) => ({ w, s: scene.start, e: scene.start }));
+  const groups = phrases(words, scene.say);
+  let gi = 0;
+  groups.forEach((g, k) => { if (t >= g[0].s - 0.05) gi = k; });
+  const group = groups[gi];
+  // the first phrase is up from the scene's first frame, so there's never a beat with no words
+  const age = gi === 0 ? f + 2 : (t - group[0].s) * FPS;
+  // top 250px clears the TikTok/Reels top bar
   return (
-    <div style={{ position: "absolute", left: 70, right: 70, top: 170, display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "0 16px", alignItems: "baseline", textAlign: "center" }}>
-      {words.map((w, i) => {
-        const shown = t >= w.s - 0.05;
+    <div style={{ position: "absolute", left: 80, right: 80, top: 250, display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "0 18px", alignItems: "baseline", textAlign: "center",
+      opacity: interpolate(age, [-1, 2], [0, 1], clamp), scale: String(interpolate(age, [-1, 5], [0.92, 1], clamp)), textShadow: "0 4px 18px rgba(0,0,0,0.55)" }}>
+      {group.map((w, i) => {
+        const said = t >= w.s - 0.05;
         const isEm = em.has(w.w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, ""));
-        const age = (t - w.s) * FPS;
         return (
-          <span key={i} style={{ fontFamily: isEm ? SERIF : SANS, fontStyle: isEm ? "italic" : "normal", fontWeight: isEm ? 400 : 600, fontSize: isEm ? 76 : 62, lineHeight: 1.2, letterSpacing: isEm ? "0" : "-0.01em", color: isEm ? GOLD : WHITE, opacity: shown ? interpolate(age, [0, 3], [0.3, 1], clamp) : 0.12, translate: `0px ${shown ? interpolate(age, [0, 4], [8, 0], clamp) : 0}px` }}>
+          <span key={`${gi}-${i}`} style={{ fontFamily: isEm ? SERIF : SANS, fontStyle: isEm ? "italic" : "normal", fontWeight: isEm ? 400 : 700, fontSize: isEm ? 92 : 76, lineHeight: 1.15, letterSpacing: isEm ? "0" : "-0.015em", color: isEm ? GOLD : WHITE, opacity: said ? 1 : 0.35 }}>
             {w.w}
           </span>
         );

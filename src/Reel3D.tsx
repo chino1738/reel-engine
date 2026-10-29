@@ -43,6 +43,16 @@ const asCoins = (s: DataScene) => CURRENCY.test(s.prefix ?? "") && num(s.value) 
 
 type Timed = DataScene & { from: number; frames: number };
 
+// what's on the pedestal right now: the scene's subject, replaced by each beat as its word is spoken
+function subjectAt(s: Timed, local: number, fps: number) {
+  let src = s.show, since = 0;
+  for (const b of s.beats ?? []) {
+    const at = Math.round((b.at - s.start) * fps);
+    if (local >= at) { src = b.show; since = at; }
+  }
+  return { src, since };
+}
+
 /* ── Camera: orbit the active station, fly between stations ── */
 
 const FRAMING: Record<string, { r: number; h: number; ly: number }> = {
@@ -329,8 +339,25 @@ function Bars({ s, local }: { s: Timed; local: number }) {
   );
 }
 
-function Scale({ s, local }: { s: Timed; local: number }) {
+// an object standing in a scale pan, turned to the camera like the pedestal art
+function PanItem({ src, y, size, cam, world }: { src: string; y: number; size: number; cam: THREE.Vector3; world: [number, number] }) {
+  const tex = useTexture(src);
+  if (!tex) return null;
+  const yaw = Math.atan2(cam.x - world[0], cam.z - world[1]);
+  return (
+    <group position={[0, y + size / 2, 0]} rotation={[0, yaw, 0]}>
+      <mesh castShadow>
+        <planeGeometry args={[size, size]} />
+        <meshStandardMaterial map={tex} transparent alphaTest={0.4} roughness={0.9} emissive="#ffffff" emissiveMap={tex} emissiveIntensity={0.4} side={THREE.DoubleSide} />
+      </mesh>
+    </group>
+  );
+}
+
+function Scale({ s, local, cam, ox }: { s: Timed; local: number; cam: THREE.Vector3; ox: number }) {
   const { fps } = useVideoConfig();
+  // coins only when the scale is weighing money; otherwise each pan holds the thing it's about
+  const money = CURRENCY.test(s.unit ?? "") || CURRENCY.test(s.prefix ?? "");
   const lv = num(s.left?.value), rv = num(s.right?.value);
   const tip = spring({ frame: local - Math.round(s.frames * 0.5), fps, config: { damping: 7, mass: 0.9, stiffness: 80 } });
   const target = Math.max(-13, Math.min(13, ((rv - lv) / Math.max(lv + rv, 1)) * 26)) * (Math.PI / 180);
@@ -347,6 +374,7 @@ function Scale({ s, local }: { s: Timed; local: number }) {
         const ex = d * arm * Math.cos(ang), ey = py - d * arm * Math.sin(ang);
         const panY = ey - 1.9;
         const v = side ? rv : lv;
+        const item = side ? s.right?.show : s.left?.show;
         const n = Math.max(1, Math.round((v / maxV) * 8));
         const t0 = Math.round(s.frames * (side ? 0.25 : 0.08));
         const show = spring({ frame: local - t0, fps, config: { damping: 12 } });
@@ -354,7 +382,8 @@ function Scale({ s, local }: { s: Timed; local: number }) {
           <group key={d} position={[ex, 0, 0]} scale={[show, show, show]}>
             <mesh position={[0, (ey + panY) / 2, 0]}><cylinderGeometry args={[0.03, 0.03, ey - panY, 8]} /><meshStandardMaterial color="#8B95A8" /></mesh>
             <mesh position={[0, panY, 0]} castShadow receiveShadow><cylinderGeometry args={[1.2, 0.9, 0.16, 48]} /><meshStandardMaterial color="#2A303C" metalness={0.5} roughness={0.35} /></mesh>
-            {Array.from({ length: n }, (_, k) => {
+            {!money && item && <PanItem src={item} y={panY + 0.08} size={1.3 + 1.1 * (v / maxV)} cam={cam} world={[ox + ex, 0]} />}
+            {(money || !item) && Array.from({ length: n }, (_, k) => {
               const at = t0 + k * 2;
               if (local < at) return null;
               const p = spring({ frame: local - at, fps, config: { damping: 11, mass: 0.5, stiffness: 180 } });
@@ -369,15 +398,16 @@ function Scale({ s, local }: { s: Timed; local: number }) {
 
 function Station({ s, local, cam, ox }: { s: Timed; local: number; cam: THREE.Vector3; ox: number }) {
   const { fps } = useVideoConfig();
+  const subj = subjectAt(s, local, fps);
   const shocks = impactsOf(s, fps).map((im, k) => <Shockwave key={`sh${k}`} at={im.at} local={local} color={s.kind === "hook" ? RED : GOLD} size={4 + im.amp * 4} />);
   let body: React.ReactNode;
   if ((s.kind === "count" || s.kind === "hook") && s.value !== undefined)
     body = asCoins(s)
-      ? <><group position={[0.9, 0, 2]}><CoinStack s={s} local={local} /></group>{s.show && <group position={[-1.3, 0, -3]}><Pedestal src={s.show} local={local} size={2.8} cam={cam} world={[ox - 1.3, -3]} /></group>}</>
-      : <><Pins s={s} local={local} color={s.kind === "hook" ? RED : GOLD} />{s.show && <Pedestal src={s.show} local={local} size={2.8} cam={cam} world={[ox, 0]} />}</>;
+      ? <><group position={[0.9, 0, 2]}><CoinStack s={s} local={local} /></group>{subj.src && <group position={[-1.3, 0, -3]}><Pedestal key={subj.src} src={subj.src} local={local - subj.since + (subj.since ? 3 : 0)} size={2.8} cam={cam} world={[ox - 1.3, -3]} /></group>}</>
+      : <><Pins s={s} local={local} color={s.kind === "hook" ? RED : GOLD} />{subj.src && <Pedestal key={subj.src} src={subj.src} local={local - subj.since + (subj.since ? 3 : 0)} size={2.8} cam={cam} world={[ox, 0]} />}</>;
   else if (s.kind === "bars") body = <Bars s={s} local={local} />;
-  else if (s.kind === "scale") body = <Scale s={s} local={local} />;
-  else body = <Pedestal src={s.show} local={local} cam={cam} world={[ox, 0]} />;
+  else if (s.kind === "scale") body = <Scale s={s} local={local} cam={cam} ox={ox} />;
+  else body = <Pedestal key={subj.src} src={subj.src} local={local - subj.since + (subj.since ? 3 : 0)} cam={cam} world={[ox, 0]} />;
   return <>{body}{shocks}</>;
 }
 
