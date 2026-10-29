@@ -5,6 +5,7 @@ import { Demo, type DemoProps } from "./Demo";
 import { Data, type DataProps } from "./Data";
 import { Data3D, type Data3DProps } from "./Data3D";
 import { Reel3D } from "./Reel3D";
+import { City, type CityProps } from "./City";
 
 const sample: ReelProps = {
   audio: "work/test.mp3",
@@ -22,8 +23,28 @@ const dataSample: DataProps = { audio: "work/test.mp3", handle: "@yourhandle", t
 
 const demoSample: DemoProps = { audio: "work/test.mp3", handle: "@yourhandle", total: 9, scenes: [] };
 
+// hand-made props for previewing the city with `npx remotion still` before any script exists
+const citySample: CityProps = { audio: "sfx/pop.wav", handle: "@bryzdaily", total: 18, scenes: [
+  { kind: "hook", say: "Why do traffic jams appear out of nowhere?", start: 0, end: 3, words: [], set: "highway", shot: "aerial", traffic: { level: 0.3 }, big: "Jams from nowhere" },
+  { kind: "line", say: "One driver taps the brakes.", start: 3, end: 6, words: [], set: "highway", shot: "reaction", reaction: { do: "no" }, traffic: { level: 0.8 } },
+  { kind: "line", say: "So the city adds a lane.", start: 6, end: 9, words: [], set: "highway", shot: "orbit", traffic: { level: 0.9 }, build: { what: "lane", at: 6.5 } },
+  { kind: "line", say: "People move farther out.", start: 9, end: 12, words: [], set: "suburb", shot: "aerial", traffic: { level: 0.3 }, build: { what: "houses", at: 9.4 } },
+  { kind: "line", say: "Downtown fills up.", start: 12, end: 15, words: [], set: "downtown", shot: "aerial", traffic: { level: 0.4, to: 0.9, at: 13 } },
+  { kind: "end", say: "And shoppers keep coming.", start: 15, end: 18, words: [], set: "store", shot: "street", people: { count: 6, do: "enter", at: 15.2 }, traffic: { level: 0.4 }, big: "Would you shop here?" },
+] };
+
 export const Root = () => (
   <>
+  <Composition
+    id="City"
+    component={City}
+    fps={FPS}
+    width={1080}
+    height={1920}
+    durationInFrames={Math.ceil((citySample.total + 0.6) * FPS)}
+    defaultProps={citySample}
+    calculateMetadata={({ props }) => ({ durationInFrames: Math.ceil((props.total + 0.6) * FPS) })}
+  />
   <Composition
     id="Reel3D"
     component={Reel3D}

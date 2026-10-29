@@ -350,7 +350,7 @@ export function Statement({ text, y = 760, size = 128, accent = GOLD }: { text: 
 
 // ≤5 words per phrase, breaking at punctuation, so the eye reads one beat at a time instead of a paragraph.
 // TTS word timings drop punctuation, so it's read from the script text when the word counts line up.
-function phrases(words: Word[], say: string) {
+export function phrases(words: Word[], say: string) {
   const toks = say.split(/\s+/).filter(Boolean);
   const punct = (i: number) => /[.,!?;:\u2014]$/.test(toks.length === words.length ? toks[i] : words[i].w);
   const out: Word[][] = [];

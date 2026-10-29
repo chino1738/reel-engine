@@ -38,7 +38,14 @@ const LANES = [
 const HIST = join(ROOT, "work", "history.json");
 const history = existsSync(HIST) ? JSON.parse(readFileSync(HIST, "utf8")) : [];
 const day = Math.floor(Date.now() / 86400000);
-const lane = LANES.find((l) => l.name === flag("--lane")) ?? LANES[day % LANES.length];
+// the city style lives in one little 3D town, so its topics have to happen in a town
+const CITY_LANES = [
+  { name: "city", brief: "how cities, traffic, roads, parking or housing really work (e.g. why traffic jams appear with no accident)", rule: "Only well-established urban-planning or traffic research. Real, checkable numbers only." },
+  { name: "money", brief: "how a store, chain or everyday business in town actually makes money (e.g. why gas stations sell so many snacks)", rule: "Real, checkable business facts. No income promises, no get-rich claims." },
+  { name: "shopping", brief: "a documented trick stores and restaurants use on shoppers (e.g. why the milk is at the back)", rule: "Only documented retail practices; say 'often' or 'many stores', never claim every store does it." },
+];
+const lanes = flag("--style", "demo") === "city" ? CITY_LANES : LANES;
+const lane = lanes.find((l) => l.name === flag("--lane")) ?? lanes[day % lanes.length];
 if (args.includes("--auto")) {
   const pick = execFileSync("claude", ["-p", "--model", "sonnet",
     `Pick ONE specific, highly clickable short-video topic. Lane: ${lane.brief}. ${lane.rule}
@@ -49,7 +56,7 @@ Return ONLY the topic, no quotes, no punctuation at the end.`], { encoding: "utf
   console.log(`▸ Lane "${lane.name}" → ${topic}`);
 }
 const lang = flag("--lang", "en");
-const style = flag("--style", "demo"); // demo | data | 3d | collage | footage
+const style = flag("--style", "demo"); // demo | data | 3d | city | collage | footage
 const dataLike = style === "data" || style === "3d";
 const handle = flag("--handle", lang === "es" ? "@curiosidades" : "@bryzdaily");
 // voices he picked 10/28: brian (default) and ava; both Multilingual, tuned for energy
@@ -110,6 +117,20 @@ VERBS: appear (pops in), drop (falls in and lands), slide, fly (flies in on an a
 FX: droplets, sparkles, steam, smoke, dust, confetti, snow, fire, bubbles, salt, hearts, zap.
 OBJECT LIST:
 ${readFileSync(join(ROOT, "data/fluent-names.txt"), "utf8").split("\n").join(" | ")}`;
+const CITY_KINDS = `THIS REEL HAPPENS IN ONE LITTLE 3D CITY (blocky low-poly toy town). Every scene is a shot in that city that SHOWS what is being said, like a little film.
+Scene fields:
+- "kind": "hook" (first) | "line" | "count" | "end" (last: asks a question for the comments, then invites a follow).
+- "set": "highway" (wide multi-lane highway with trees) | "downtown" (street grid, shops, towers) | "suburb" (street of houses with yards) | "store" (one shop front on a downtown street).
+- "shot": "aerial" (drone, high) | "street" (low, at street level) | "chase" (behind a car in traffic: highway or downtown) | "orbit" (slow circle around the set) | "reaction" (close-up of one person reacting, the set behind them).
+- "traffic": {"level": 0-1 (0 empty, 0.5 busy, 1 gridlock), "to": optional new level, "on": the exact word in "say" where it changes}.
+- "build": {"what": "lane" (highway: a new lane is laid) | "tower" (downtown: a skyscraper rises) | "houses" (suburb: new houses spread out), "on": exact word}.
+- "people": {"count": 1-14, "do": "walk" | "run" | "enter" (walk into the shop), "on": exact word} (store or downtown sets).
+- "reaction": {"do": "no" (shakes head, frustrated) | "yes" (nods, realises) | "idle" | "pick-up"} (reaction shots only).
+- "big": on-screen words, max 5, for hook/line/end (leave it out on reaction shots).
+- count scenes: "value" (number only), optional "prefix" ("$"), "suffix" ("%", " min"), "label" (max 6 words), "on" (word where the number is spoken).
+- "em": 1-2 words copied from "say" to highlight.
+DIRECTING: the shot acts out the sentence, timed to the word ("more people pile on" → traffic rises ON "pile"; "they add a lane" → build lane ON "lane"; "shoppers walk in" → people enter ON "walk"). Change the set or the shot every scene. Use at least 3 different shots and 2 different sets. The reaction person is the viewer's stand-in (frustrated = "no", realisation = "yes"): use them 1-2 times. Open on a strong establishing shot (aerial or chase).
+Rules: 5-7 scenes. EVERY number must be real and from your sources; if you can't source a number, leave it out.`;
 const DATA_KINDS = `THIS IS A STAT-FLIP REEL: the numbers are the visuals. Story arc: a surprising or bad-sounding number → "sounds bad/weird, until you see why" → the number that flips it → the real reason → end on a question.
 Scene kinds:
 - hook: first scene. Opens the curiosity gap in the first 1.5 seconds. "big" = on-screen words (max 5). If the hook states a number, also give "value" (the number only, e.g. 3628 or 1.50), optional "prefix" ("$"), "suffix" ("%", "B", " times"), "on" (the word in "say" where the number is spoken).
@@ -133,7 +154,7 @@ Reglas: 5 a 6 escenas; todo el "say" junto suma 60-80 palabras (~30 s); cada "sa
   : `You write short-form "did you know / why does" explainer reels in plain, punchy American English. Topic: "${topic}".
 Return ONLY a JSON object with: "title", "caption" (1-2 sentences), "hashtags" (5, no #), "sources" (2-3 real, checkable sources: institution, study or encyclopedia), "confidence" ("high"|"medium"), "scenes" (array).
 Each scene: {"kind", "say", "broll", ...fields for its kind}. "broll" = 2-4 English words to search a stock video clip that literally shows what's being said (e.g. "ocean waves aerial", "airplane meal tray"). Concrete, filmable things only.
-${dataLike ? DATA_KINDS : SCENE_TYPES_EN}
+${style === "city" ? CITY_KINDS : dataLike ? DATA_KINDS : SCENE_TYPES_EN}
 ${args.includes("--auto") ? `Lane: ${lane.name}. ${lane.rule}\n` : ""}Rules: 5-6 scenes; all "say" text together is 60-80 words (~30 s); each "say" is one short, natural sentence. Use at least 3 different scene kinds. Only well-established facts; never invent numbers. Sound like an excited friend who just learned this: punchy, contractions, an exclamation point or a "here's the crazy part" beat where it fits, but never fake hype words like "insane" or "mind-blowing". Explain the why simply. No filler, no "did you know".
 ${style === "collage" ? COLLAGE_FIELDS : style === "demo" ? DEMO_FIELDS : ""}
 ${style === "3d" ? `Also give every "show" (scene, beat, scale side) a "model": 1-2 plain English nouns to search a 3D model library for that same physical thing ("hand", "brain", "car tire", "shopping cart"). Concrete objects only, no faces or abstract ideas.` : ""}`;
@@ -188,6 +209,24 @@ if (style === "demo") {
     s.mascot = await fluentAsset(POSES[s.kind] ?? "Man tipping hand", "medium");
   }
   console.log(`  ${scenes.map((s) => s.beats.map((b) => b.do).join("+")).join(" | ")}`);
+}
+if (style === "city") {
+  // every "on" word becomes the second it's spoken, so the city reacts on cue
+  const norm = (w) => String(w).toLowerCase().replace(/[^a-z0-9.%$]/g, "").replace(/^\$/, "");
+  const when = (s, on) => {
+    const t = norm(on ?? "");
+    const w = t && s.words.find((w) => norm(w.w) === t || (norm(w.w).length > 3 && (norm(w.w).startsWith(t) || t.startsWith(norm(w.w)))));
+    return w ? w.s : undefined;
+  };
+  for (const s of scenes) {
+    if (Array.isArray(s.big)) s.big = s.big.join(" "); // the writer sometimes splits the headline into lines
+    for (const k of ["traffic", "build", "people"]) if (s[k]?.on) s[k].at = when(s, s[k].on);
+    if (s.value !== undefined) {
+      const w = [s.on, s.value].filter(Boolean).map((x) => when(s, x)).find((x) => x !== undefined);
+      s.hit = w !== undefined ? s.words.find((x) => x.s === w).e : s.start + (s.end - s.start) * 0.6;
+    }
+  }
+  console.log(`  ${scenes.map((s) => `${s.set ?? "highway"}/${s.shot ?? "aerial"}`).join(" → ")}`);
 }
 if (dataLike) {
   // the count lands on the word where the number is spoken
@@ -308,7 +347,7 @@ if (args.includes("--focus")) {
 }
 const serveUrl = await bundle({ entryPoint: join(ROOT, "src/index.ts"), publicDir: join(ROOT, "public") });
 const inputProps = { audio: audioRel, handle, lang, total: timing.total, scenes };
-const composition = await selectComposition({ serveUrl, id: { demo: "Demo", data: "Data", "3d": "Reel3D", collage: "Collage" }[style] ?? "Reel", inputProps });
+const composition = await selectComposition({ serveUrl, id: { demo: "Demo", data: "Data", "3d": "Reel3D", collage: "Collage", city: "City" }[style] ?? "Reel", inputProps });
 const outFile = join(ROOT, "out", `${id}.mp4`);
 let last = -1;
 await renderMedia({
@@ -318,8 +357,8 @@ await renderMedia({
   crf: 23, // about half the size of the default 18; the apps re-encode anyway, and texts send faster
   outputLocation: outFile,
   inputProps,
-  concurrency: style === "3d" ? 1 : 2, // WebGL is memory hungry on 8GB
-  ...(style === "3d" ? { chromiumOptions: { gl: "angle" } } : {}),
+  concurrency: style === "3d" || style === "city" ? 1 : 2, // WebGL is memory hungry on 8GB
+  ...(style === "3d" || style === "city" ? { chromiumOptions: { gl: "angle" } } : {}),
   onProgress: ({ progress }) => {
     const pct = Math.floor(progress * 10) * 10;
     if (pct !== last) { last = pct; process.stdout.write(`  ${pct}%`); }
