@@ -123,6 +123,7 @@ Scene fields:
 - "set": "highway" (wide multi-lane highway with trees) | "downtown" (street grid, shops, towers) | "suburb" (street of houses with yards) | "store" (one shop front on a downtown street).
 - "shot": "aerial" (drone, high) | "street" (low, at street level) | "chase" (behind a car in traffic: highway or downtown) | "orbit" (slow circle around the set) | "reaction" (close-up of one person reacting, the set behind them).
 - "traffic": {"level": 0-1 (0 empty, 0.5 busy, 1 gridlock), "to": optional new level, "on": the exact word in "say" where it changes}.
+- "brake": {"on": exact word} = one driver in view slams the brakes on that word; their brake lights flash and the cars behind brake one after another (a real slowdown wave). Use it whenever the words are about braking, slowing or a chain reaction; best with "chase" (we ride behind the car that brakes) or "aerial"/"orbit" (we watch the wave roll back), at traffic level 0.5+.
 - "build": {"what": "lane" (highway: a new lane is laid) | "tower" (downtown: a skyscraper rises) | "houses" (suburb: new houses spread out), "on": exact word}.
 - "people": {"count": 1-14, "do": "walk" | "run" | "enter" (walk into the shop), "on": exact word} (store or downtown sets).
 - "reaction": {"do": "no" (shakes head, frustrated) | "yes" (nods, realises) | "idle" | "pick-up"} (reaction shots only).
@@ -220,7 +221,7 @@ if (style === "city") {
   };
   for (const s of scenes) {
     if (Array.isArray(s.big)) s.big = s.big.join(" "); // the writer sometimes splits the headline into lines
-    for (const k of ["traffic", "build", "people"]) if (s[k]?.on) s[k].at = when(s, s[k].on);
+    for (const k of ["traffic", "build", "people", "brake"]) if (s[k]?.on) s[k].at = when(s, s[k].on);
     if (s.value !== undefined) {
       const w = [s.on, s.value].filter(Boolean).map((x) => when(s, x)).find((x) => x !== undefined);
       s.hit = w !== undefined ? s.words.find((x) => x.s === w).e : s.start + (s.end - s.start) * 0.6;

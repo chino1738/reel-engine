@@ -23,6 +23,7 @@ export type CityScene = DataScene & {
   set?: SetName;
   shot?: Shot;
   traffic?: { level?: number; to?: number; at?: number };
+  brake?: { at?: number }; // one driver in view brakes hard on this word; the queue behind reacts
   build?: { what?: "lane" | "tower" | "houses"; at?: number };
   people?: { count?: number; do?: "walk" | "run" | "enter"; at?: number };
   reaction?: { do?: "no" | "yes" | "idle" | "pick-up" };
@@ -78,7 +79,8 @@ function useAssets() {
     const loader = new GLTFLoader();
     Promise.all(Object.entries(ASSETS).map(([k, src]) => loader.loadAsync(staticFile(src)).then((g) => {
       g.scene.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
-      g.userData.height = new THREE.Box3().setFromObject(g.scene).getSize(new THREE.Vector3()).y; // characters get sized from this
+      g.userData.box = new THREE.Box3().setFromObject(g.scene); // tail lights sit on the back face
+      g.userData.height = g.userData.box.getSize(new THREE.Vector3()).y; // characters get sized from this
       return [k, g] as const;
     }))).then((all) => setLib(Object.fromEntries(all)), (e) => setErr(String(e?.message ?? e)));
   }, [handle]);
@@ -118,35 +120,225 @@ function densityAt(s: Timed, local: number, fps: number) {
   const at = atFrame(s, tr.at, fps, 0.4);
   return lerp(a, tr.to, Easing.inOut(Easing.cubic)(interpolate(local, [at, at + fps * 1.6], [0, 1], clamp)));
 }
-const speedOf = (d: number) => lerp(15, 0.7, Math.pow(d, 0.8)); // free flow ~15 u/s, gridlock crawls
 
-type Lane = { id: number; a: THREE.Vector3; dir: THREE.Vector3; len: number; slots: number; opensAt?: number };
+/* ── traffic: a car-following simulation (the Intelligent Driver Model traffic engineers use) ──
+   Every car keeps a safe gap and reacts to the car ahead, so one hard brake sends a slowdown wave
+   backwards through the queue, and cars can never overlap. Downtown intersections run on lights. */
 
-function Traffic({ lib, s, local, lanes }: { lib: Lib; s: Timed; local: number; lanes: Lane[] }) {
-  const { fps } = useVideoConfig();
-  const dist = useMemo(() => {
-    const out = [0];
-    for (let f = 1; f <= s.frames + 2; f++) out.push(out[f - 1] + speedOf(densityAt(s, f, fps)) / fps);
-    return out;
-  }, [s, fps]);
-  const d = densityAt(s, local, fps);
-  const travelled = dist[Math.max(0, Math.min(local, dist.length - 1))];
-  const cars: React.ReactNode[] = [];
+// `show` is the stretch of the loop that's on the map; outside it cars are hidden and can spawn
+type Lane = { id: number; a: THREE.Vector3; dir: THREE.Vector3; len: number; show: [number, number]; opensAt?: number; stops?: number[]; phase?: 0 | 1 };
+type Car = { id: number; u: number; v: number; a: number };
+
+const CAR_LEN = 1.75, GAP0 = 0.9, HEADWAY = 1.0, ACC = 1.2, DEC = 2.4, V0 = 9; // world units (~2.8 m) and seconds
+const PREROLL = 90; // frames simulated before the scene starts so traffic has already settled
+// signal cycle: x-roads green 0–5 s, all-red 1 s, z-roads green 6–11 s, all-red 1 s
+const green = (phase: 0 | 1, t: number) => { const c = ((t % 12) + 12) % 12; return phase === 0 ? c < 5 : c >= 6 && c < 11; };
+const hidden = (ln: Lane, u: number) => u < ln.show[0] || u > ln.show[1];
+
+type LaneSim = { lane: Lane; frames: Car[][] };
+type Sim = { lanes: LaneSim[]; heroLane?: number; hero?: number; braker?: number };
+
+function simulateLane(ln: Lane, s: Timed, fps: number, brakeFrame: number, pickBraker?: (cars: Car[]) => number | undefined, pickHero?: (cars: Car[]) => number | undefined) {
+  const nmax = Math.floor(ln.len / (CAR_LEN + GAP0 + 0.4));
+  const target = (f: number) => (ln.opensAt !== undefined && f < ln.opensAt ? 0 : Math.round(densityAt(s, Math.max(0, f), fps) * nmax));
+  let cars: (Car & { v0: number })[] = [];
+  let next = 0;
+  const n0 = target(-PREROLL);
+  for (let k = 0; k < n0; k++) cars.push({ id: next++, u: (k / Math.max(1, n0)) * ln.len, v: V0 * 0.5, a: 0, v0: 0 });
+  cars.forEach((c) => (c.v0 = V0 * (0.88 + 0.24 * hash(ln.id * 13 + c.id))));
+  const frames: Car[][] = [];
+  let braker: number | undefined, hero: number | undefined, brakeUntil = -1;
+  const dt = 1 / fps / 2;
+  for (let f = -PREROLL; f <= s.frames + 2; f++) {
+    if (f === 0 && pickHero) hero = pickHero(cars);
+    if (f === brakeFrame && pickBraker) { braker = pickBraker(cars); brakeUntil = f + Math.round(fps * 1.2); }
+    const t = (s.from + f) / fps;
+    for (let sub = 0; sub < 2; sub++) {
+      cars.sort((x, y) => x.u - y.u);
+      const n = cars.length;
+      for (let i = 0; i < n; i++) {
+        const c = cars[i], lead = cars[(i + 1) % n];
+        let gap = n > 1 ? (((lead.u - c.u - CAR_LEN) % ln.len) + ln.len) % ln.len : 1e9, vl = n > 1 ? lead.v : c.v;
+        // a red light is a stopped car at the line, unless we're already over it
+        if (ln.stops && ln.phase !== undefined && !green(ln.phase, t))
+          for (const st of ln.stops) {
+            const dl = (((st - c.u - CAR_LEN / 2) % ln.len) + ln.len) % ln.len;
+            if (dl < gap && dl < 30 && c.v * c.v / (2 * 6) < dl + 0.5) { gap = dl; vl = 0; }
+          }
+        const sStar = GAP0 + Math.max(0, c.v * HEADWAY + (c.v * (c.v - vl)) / (2 * Math.sqrt(ACC * DEC)));
+        c.a = ACC * (1 - Math.pow(c.v / c.v0, 4) - Math.pow(sStar / Math.max(gap, 0.05), 2));
+        if (c.id === braker && f >= brakeFrame && f < brakeUntil) c.a = -7; // the driver who taps the brakes
+        c.a = Math.max(-9, c.a);
+      }
+      for (const c of cars) { const v = Math.max(0, c.v + c.a * dt); c.u += ((c.v + v) / 2) * dt; c.v = v; }
+      // hard guarantee: nobody ever ends up inside the car ahead
+      cars.sort((x, y) => x.u - y.u);
+      for (let i = cars.length - 2; i >= 0; i--) {
+        const c = cars[i], lead = cars[i + 1];
+        if (lead.u - c.u < CAR_LEN + 0.05) { c.u = lead.u - CAR_LEN - 0.05; c.v = Math.min(c.v, lead.v); }
+      }
+      for (const c of cars) c.u = ((c.u % ln.len) + ln.len) % ln.len;
+    }
+    // more or fewer cars: they join and leave off the map, never in view
+    if (f % 4 === 0) {
+      const want = target(f);
+      if (cars.length < want) {
+        cars.sort((x, y) => x.u - y.u);
+        let best = -1, bestGap = 0;
+        cars.forEach((c, i) => {
+          const lead = cars[(i + 1) % cars.length];
+          const g = cars.length > 1 ? (((lead.u - c.u) % ln.len) + ln.len) % ln.len : ln.len;
+          const mid = (c.u + g / 2) % ln.len;
+          if (g > bestGap && g > 2 * (CAR_LEN + GAP0) + 1 && hidden(ln, mid)) { best = i; bestGap = g; }
+        });
+        if (cars.length === 0) cars.push({ id: next++, u: (ln.show[1] + ln.len) / 2 % ln.len, v: V0 * 0.7, a: 0, v0: V0 });
+        else if (best >= 0) { const c = cars[best]; cars.push({ id: next++, u: (c.u + bestGap / 2) % ln.len, v: c.v, a: 0, v0: V0 * (0.88 + 0.24 * hash(ln.id * 13 + next)) }); }
+      } else if (cars.length > want) {
+        const k = cars.findIndex((c) => hidden(ln, c.u) && c.id !== hero && c.id !== braker);
+        if (k >= 0) cars.splice(k, 1);
+      }
+    }
+    if (f >= 0) frames.push(cars.map((c) => ({ id: c.id, u: c.u, v: c.v, a: c.a })));
+  }
+  return { frames, braker, hero };
+}
+
+const simCache = new Map<string, Sim>();
+const laneAt = (ln: Lane, u: number) => ln.a.clone().addScaledVector(ln.dir, u);
+
+function simFor(s: Timed, fps: number): Sim {
+  const key = `${s.from}|${s.frames}|${setOf(s)}|${s.shot}`;
+  const hit = simCache.get(key);
+  if (hit) return hit;
+  const lanes = lanesFor(s, fps);
+  const brakeFrame = s.brake ? atFrame(s, s.brake.at, fps, 0.3) : -1e9;
+  const heroLane = s.shot === "aerial" || s.shot === "orbit" ? NEAR_LANE[setOf(s)] : HERO_LANE[setOf(s)];
+  const sim: Sim = { lanes: [], heroLane };
   for (const ln of lanes) {
-    if (ln.opensAt !== undefined && local < ln.opensAt) continue;
+    if (ln.id !== heroLane) { sim.lanes.push({ lane: ln, frames: simulateLane(ln, s, fps, -1e9).frames }); continue; }
+    // the hero lane: the camera rides behind one car; in a chase the car just ahead of it brakes,
+    // otherwise whichever car is nearest the middle of the shot
+    const focusU = (x: number) => (cars: Car[]) => cars.reduce<Car | undefined>((b, c) => (!b || Math.abs(laneAt(ln, c.u).x - x) < Math.abs(laneAt(ln, b.u).x - x) ? c : b), undefined)?.id;
+    let heroId: number | undefined;
+    const r = simulateLane(ln, s, fps, brakeFrame,
+      s.shot === "chase"
+        ? (cars) => { const sorted = [...cars].sort((x, y) => x.u - y.u); const i = sorted.findIndex((c) => c.id === heroId); return i >= 0 ? sorted[(i + 1) % sorted.length].id : undefined; }
+        : focusU(FOCUS_X[setOf(s)]),
+      (cars) => (heroId = focusU(FOCUS_X[setOf(s)] - 10)(cars)));
+    sim.lanes.push({ lane: ln, frames: r.frames });
+    sim.hero = r.hero;
+    sim.braker = r.braker;
+  }
+  simCache.set(key, sim);
+  return sim;
+}
+
+// where the hero car is at a frame (for the chase camera)
+function heroPos(sim: Sim, local: number) {
+  const ls = sim.lanes.find((l) => l.lane.id === sim.heroLane);
+  const c = ls?.frames[Math.min(local, ls.frames.length - 1)]?.find((x) => x.id === sim.hero);
+  return ls && c ? laneAt(ls.lane, c.u) : null;
+}
+
+function Traffic({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
+  const { fps } = useVideoConfig();
+  const sim = simFor(s, fps);
+  const far = s.shot === "aerial" || s.shot === "orbit";
+  const out: React.ReactNode[] = [];
+  for (const { lane: ln, frames } of sim.lanes) {
+    const cars = frames[Math.max(0, Math.min(local, frames.length - 1))] ?? [];
     const yaw = Math.atan2(ln.dir.x, ln.dir.z);
-    for (let i = 0; i < ln.slots; i++) {
-      if (hash(ln.id * 31 + i) > d * 1.05) continue; // more slots fill as density rises
-      const u = (((i / ln.slots) * ln.len + travelled * (0.92 + hash(ln.id) * 0.16) + hash(ln.id + 5) * ln.len) % ln.len);
-      const p = ln.a.clone().addScaledVector(ln.dir, u);
-      const kind = CARS[Math.floor(hash(ln.id * 7 + i * 3) * CARS.length)];
-      cars.push(<Model key={`${ln.id}-${i}`} lib={lib} name={kind} position={[p.x, 0.02, p.z]} rotation={[0, yaw, 0]} scale={0.62} />);
+    for (const c of cars) {
+      if (hidden(ln, c.u)) continue;
+      // ease in/out at the map edge instead of popping
+      const edge = Math.min(c.u - ln.show[0], ln.show[1] - c.u);
+      const sc = Math.min(1, edge / 1.5);
+      const p = laneAt(ln, c.u);
+      const kind = CARS[Math.floor(hash(ln.id * 7 + c.id * 3) * CARS.length)];
+      const braking = c.a < -0.4 || c.v < 0.3;
+      // nose dips a touch under hard braking
+      out.push(<CarModel key={`${ln.id}-${c.id}`} lib={lib} kind={kind} braking={braking} far={far} position={[p.x, 0.02, p.z]} rotation={[Math.max(0, -c.a) * 0.006, yaw, 0]} scale={0.62 * sc} />);
     }
   }
-  return <>{cars}</>;
+  return <>{out}</>;
+}
+
+// a car plus its tail lights; the lights only glow when it's slowing down or stopped
+function CarModel({ lib, kind, braking, far = false, ...rest }: { lib: Lib; kind: string; braking: boolean; far?: boolean } & ThreeElements["group"]) {
+  const obj = useMemo(() => lib[kind]?.scene.clone(true), [lib, kind]);
+  const box = lib[kind]?.userData.box as THREE.Box3 | undefined;
+  if (!obj || !box) return null;
+  const rear = CAR_FRONT > 0 ? box.min.z : box.max.z;
+  const w = (box.max.x - box.min.x) * 0.34, y = box.min.y + (box.max.y - box.min.y) * 0.42;
+  return (
+    <group {...rest}>
+      <primitive object={obj} />
+      {[-w, w].map((x) => (
+        <group key={x} position={[x, y, rear - CAR_FRONT * 0.02]}>
+          <mesh>
+            <boxGeometry args={[0.36, 0.2, 0.06]} />
+            <meshStandardMaterial color={braking ? "#FF2A1A" : "#5A1410"} emissive={braking ? "#FF2A1A" : "#000000"} emissiveIntensity={braking ? 4 : 0} toneMapped={false} />
+          </mesh>
+          {braking && (
+            // soft glow so the brake reads on a phone screen, even from the drone
+            // from the drone it lies flat and wide, so a braking wave reads as red rolling back down the lane
+            <mesh position={far ? [0, 0.6, -CAR_FRONT * 0.4] : [0, 0, -CAR_FRONT * 0.05]} rotation={far ? [-Math.PI / 2, 0, 0] : [0, CAR_FRONT > 0 ? Math.PI : 0, 0]}>
+              <circleGeometry args={[far ? 0.95 : 0.24, 20]} />
+              <meshBasicMaterial color="#FF3B2A" transparent opacity={far ? 0.75 : 0.35} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+            </mesh>
+          )}
+        </group>
+      ))}
+    </group>
+  );
 }
 
 const X = new THREE.Vector3(1, 0, 0), NX = new THREE.Vector3(-1, 0, 0), Z = new THREE.Vector3(0, 0, 1), NZ = new THREE.Vector3(0, 0, -1);
+const CAR_FRONT = 1; // the car kit's models face +z
+
+/* ── roads as lanes, per set ── */
+
+const MARGIN = 14; // off-map run-out at each end of a road, where cars wait out of sight
+const HERO_LANE: Record<SetName, number> = { highway: 0, downtown: 108, store: 108, suburb: 300 };
+// on drone/orbit shots the brake happens in the lane nearest the camera, so the wave is easy to follow
+const NEAR_LANE: Record<SetName, number> = { highway: 5 /* outer lane of the 3rd strip */, downtown: 108, store: 108, suburb: 300 };
+const FOCUS_X: Record<SetName, number> = { highway: 6, downtown: 0, store: 0, suburb: 0 };
+
+function lanesFor(s: Timed, fps: number): Lane[] {
+  const set = setOf(s);
+  const lanes: Lane[] = [];
+  if (set === "highway") {
+    const L = HWY.len * T;
+    const building = s.build?.what === "lane";
+    const strips = HWY.strips + (building ? 1 : 0);
+    const opens = building ? atFrame(s, s.build?.at, fps, 0.3) + 40 : undefined;
+    for (let strip = 0; strip < strips; strip++)
+      for (let lane = 0; lane < 2; lane++)
+        lanes.push({ id: strip * 2 + lane, a: new THREE.Vector3(-L / 2, 0, strip * T + (lane ? 0.9 : -0.9)), dir: X, len: L, show: [0, L - 26], opensAt: strip >= HWY.strips ? opens : undefined });
+    return lanes;
+  }
+  if (set === "suburb") {
+    const L = SUB.n * T, M = 20;
+    lanes.push({ id: 300, a: new THREE.Vector3(-L / 2 - M, 0, 0.9), dir: X, len: L + 2 * M, show: [M, L + M] });
+    lanes.push({ id: 301, a: new THREE.Vector3(L / 2 + M, 0, -0.9), dir: NX, len: L + 2 * M, show: [M, L + M] });
+    return lanes;
+  }
+  // downtown grid: every road line carries both directions; intersections run on two light phases
+  const half = (DT.n / 2) * T, M = MARGIN, len = DT.n * T + 2 * M;
+  const centres = [0, 3, 6, 9].map((k) => dtPos(k, k));
+  const stopsAlong = (toU: (c: THREE.Vector3) => number) => centres.map((c) => toU(c) - T / 2 - 0.25).map((u) => ((u % len) + len) % len);
+  [0, 3, 6, 9].forEach((k, n) => {
+    const c = dtPos(k, k);
+    const quiet = setOf(s) === "store" && k === STORE.j + 1; // the shop's own street stays clear for the shot
+    if (!quiet) {
+      lanes.push({ id: 100 + n * 4, a: new THREE.Vector3(-half - M, 0, c.z + 0.9), dir: X, len, show: [M, len - M], phase: 0, stops: stopsAlong((q) => q.x + half + M) });
+      lanes.push({ id: 101 + n * 4, a: new THREE.Vector3(half + M, 0, c.z - 0.9), dir: NX, len, show: [M, len - M], phase: 0, stops: stopsAlong((q) => half + M - q.x) });
+    }
+    lanes.push({ id: 102 + n * 4, a: new THREE.Vector3(c.x - 0.9, 0, -half - M), dir: Z, len, show: [M, len - M], phase: 1, stops: stopsAlong((q) => q.z + half + M) });
+    lanes.push({ id: 103 + n * 4, a: new THREE.Vector3(c.x + 0.9, 0, half + M), dir: NZ, len, show: [M, len - M], phase: 1, stops: stopsAlong((q) => half + M - q.z) });
+  });
+  return lanes;
+}
 
 /* ── highway: wide straight road; a new lane can be laid tile by tile ── */
 
@@ -172,10 +364,6 @@ function Highway({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
       tiles.push(<Model key={`r${strip}-${k}`} lib={lib} name="road" position={[x, y, strip * T]} scale={[T * sc, T, T * sc]} />);
     }
   }
-  const lanes: Lane[] = [];
-  for (let strip = 0; strip < strips; strip++)
-    for (let lane = 0; lane < 2; lane++)
-      lanes.push({ id: strip * 2 + lane, a: new THREE.Vector3(-L / 2, 0, strip * T + (lane ? 0.9 : -0.9)), dir: X, len: L, slots: 26, opensAt: strip >= HWY.strips ? buildAt + 40 : undefined });
   const side: React.ReactNode[] = [];
   for (let k = 0; k < HWY.len; k += 2) {
     const x = (k - HWY.len / 2) * T;
@@ -185,7 +373,7 @@ function Highway({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
   // construction barriers while the new lane goes down
   if (building && local > buildAt && local < buildAt + 60)
     for (let k = -3; k <= 3; k++) side.push(<Model key={`c${k}`} lib={lib} name="cone" position={[k * T * 1.5, 0, (strips - 1) * T - 1.7]} scale={T * 1.8} />);
-  return <>{tiles}{side}<Traffic lib={lib} s={s} local={local} lanes={lanes} /></>;
+  return <>{tiles}{side}<Traffic lib={lib} s={s} local={local} /></>;
 }
 
 /* ── downtown: a street grid with shops, towers in the middle, one storefront ── */
@@ -217,18 +405,6 @@ function Downtown({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
       tiles.push(<Model key={`b${i}-${j}`} lib={lib} name={name} position={p} rotation={[0, yaw, 0]} scale={[fit, fit * sy, fit]} />);
       if (isStore) tiles.push(<Model key="awning" lib={lib} name="awning" position={[p.x, 0, p.z + T * 0.42]} scale={T * 0.96} />);
     }
-  const half = (DT.n / 2) * T;
-  const lanes: Lane[] = [];
-  [0, 3, 6, 9].forEach((k, n) => {
-    const c = dtPos(k, k);
-    const quiet = setOf(s) === "store" && k === STORE.j + 1; // the shop's own street stays clear for the shot
-    if (!quiet) {
-      lanes.push({ id: 100 + n * 4, a: new THREE.Vector3(-half, 0, c.z - 0.9), dir: X, len: half * 2, slots: 10 });
-      lanes.push({ id: 101 + n * 4, a: new THREE.Vector3(half, 0, c.z + 0.9), dir: NX, len: half * 2, slots: 10 });
-    }
-    lanes.push({ id: 102 + n * 4, a: new THREE.Vector3(c.x + 0.9, 0, -half), dir: Z, len: half * 2, slots: 10 });
-    lanes.push({ id: 103 + n * 4, a: new THREE.Vector3(c.x - 0.9, 0, half), dir: NZ, len: half * 2, slots: 10 });
-  });
   return (
     <>
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.005, 0]} receiveShadow>
@@ -236,7 +412,7 @@ function Downtown({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
         <meshStandardMaterial color="#C9CDD3" roughness={1} />
       </mesh>
       {tiles}
-      <Traffic lib={lib} s={s} local={local} lanes={lanes} />
+      <Traffic lib={lib} s={s} local={local} />
       <Walkers lib={lib} s={s} local={local} />
     </>
   );
@@ -277,10 +453,10 @@ function Walkers({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
 
 /* ── suburb: a street of houses; "houses" spreads new ones out to the far rows ── */
 
+const SUB = { n: 18 };
 function Suburb({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
   const { fps } = useVideoConfig();
-  const n = 18;
-  const L = n * T;
+  const n = SUB.n;
   const spreadAt = s.build?.what === "houses" ? atFrame(s, s.build.at, fps, 0.3) : Infinity;
   const items: React.ReactNode[] = [];
   for (let k = 0; k < n; k++) {
@@ -301,11 +477,7 @@ function Suburb({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
       }
     }
   }
-  const lanes: Lane[] = [
-    { id: 300, a: new THREE.Vector3(-L / 2, 0, -0.9), dir: X, len: L, slots: 8 },
-    { id: 301, a: new THREE.Vector3(L / 2, 0, 0.9), dir: NX, len: L, slots: 8 },
-  ];
-  return <>{items}<Traffic lib={lib} s={s} local={local} lanes={lanes} /></>;
+  return <>{items}<Traffic lib={lib} s={s} local={local} /></>;
 }
 
 /* ── the reaction close-up: one person, front and centre, the set behind them ── */
@@ -329,7 +501,7 @@ function Reactor({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
 
 /* ── camera shots, per set ── */
 
-function shotAt(s: Timed, local: number) {
+function shotAt(s: Timed, local: number, fps: number) {
   const k = Math.min(1, local / Math.max(1, s.frames));
   const set = setOf(s);
   const o = ORIGIN[set];
@@ -343,8 +515,13 @@ function shotAt(s: Timed, local: number) {
     const mid = ((HWY.strips - 1) * T) / 2;
     switch (s.shot) {
       case "street": return { pos: at(-30 + k * 8, 2.2, -5.5), look: at(10 + k * 8, 1.2, mid) };
-      case "chase": return { pos: at(-14 + k * 4, 4.2, -0.9), look: at(4 + k * 4, 1, -0.6) };
-      case "orbit": { const a = -0.6 + k * 0.7; return { pos: at(Math.sin(a) * 42, 22, mid + Math.cos(a) * 42), look: at(0, 0, mid) }; }
+      case "chase": {
+        // ride behind the hero car: when the car ahead brakes, we brake with it
+        const h = heroPos(simFor(s, fps), local);
+        if (h) return { pos: at(h.x - 8.5, 3.4, h.z - 0.3), look: at(h.x + 7, 0.9, h.z) };
+        return { pos: at(-14 + k * 4, 4.2, -0.9), look: at(4 + k * 4, 1, -0.6) };
+      }
+      case "orbit": { const a = -0.6 + k * 0.7; return { pos: at(Math.sin(a) * 30 - 6, 15, mid + Math.cos(a) * 30), look: at(-4, 0, mid) }; }
       default: return { pos: at(-26 + k * 10, 34, mid + 26), look: at(6 + k * 10, 0, mid) };
     }
   }
@@ -363,23 +540,27 @@ function shotAt(s: Timed, local: number) {
     return { pos: at(door.x - 13 + k * 2.5, 3.2, door.z + T * 1.0), look: at(door.x + 1 + k * 1.5, 1.7, door.z + T * 0.55) };
   }
   switch (s.shot) {
-    case "chase": return { pos: at(-20 + k * 6, 4, dtPos(6, 6).z - 0.9), look: at(-2 + k * 6, 1, dtPos(6, 6).z - 0.9) };
+    case "chase": {
+      const h = heroPos(simFor(s, fps), local);
+      if (h) return { pos: at(h.x - 8, 3.6, h.z - 0.2), look: at(h.x + 7, 0.9, h.z) };
+      return { pos: at(-20 + k * 6, 4, dtPos(6, 6).z - 0.9), look: at(-2 + k * 6, 1, dtPos(6, 6).z - 0.9) };
+    }
     case "orbit": { const a = -0.7 + k * 0.8; return { pos: at(Math.sin(a) * 34, 26, Math.cos(a) * 34), look: at(0, 4, 0) }; }
     default: return { pos: at(-14 + k * 6, 40, 30), look: at(2 + k * 4, 0, 0) };
   }
 }
 
 const WHIP = 10, SLAM = 20;
-function cameraAt(scenes: Timed[], f: number) {
+function cameraAt(scenes: Timed[], f: number, fps: number) {
   let i = scenes.findIndex((_, k) => f < (scenes[k + 1]?.from ?? Infinity));
   if (i < 0) i = scenes.length - 1;
   const s = scenes[i];
   const local = f - s.from;
-  let { pos, look } = shotAt(s, local);
+  let { pos, look } = shotAt(s, local, fps);
   let roll = 0, whip = 0;
   if (i > 0 && local < WHIP) {
     // whip pan: hangs, snaps through, settles; blur follows the speed
-    const prev = shotAt(scenes[i - 1], scenes[i - 1].frames);
+    const prev = shotAt(scenes[i - 1], scenes[i - 1].frames, fps);
     const ease = Easing.inOut(Easing.exp);
     const u = local / WHIP, t = ease(u);
     pos = prev.pos.clone().lerp(pos, t);
@@ -409,7 +590,8 @@ const SETS: Record<SetName, (p: { lib: Lib; s: Timed; local: number }) => React.
 
 function World({ scenes, lib }: { scenes: Timed[]; lib: Lib }) {
   const f = useCurrentFrame();
-  const cam = cameraAt(scenes, f);
+  const { fps } = useVideoConfig();
+  const cam = cameraAt(scenes, f, fps);
   const s = scenes[cam.i];
   // the set we're in, plus the one we're whipping in from
   const prev = cam.i > 0 && cam.local < WHIP ? scenes[cam.i - 1] : null;
@@ -467,7 +649,9 @@ function CityCaption({ scene }: { scene: Timed }) {
 function Overlay({ s }: { s: Timed }) {
   const outline = { WebkitTextStroke: "10px #161616", paintOrder: "stroke fill" } as React.CSSProperties;
   if (s.value !== undefined) return <div style={outline}><Counter scene={s} y={760} size={210} /></div>;
-  if (s.big && s.shot !== "reaction" && (s.kind === "line" || s.kind === "end" || s.kind === "hook")) return <div style={outline}><Statement text={s.big} y={1260} size={112} /></div>;
+  // on low shots the action is mid-frame, so the headline sits up under the caption instead
+  const low = s.shot === "chase" || s.shot === "street";
+  if (s.big && s.shot !== "reaction" && (s.kind === "line" || s.kind === "end" || s.kind === "hook")) return <div style={outline}><Statement text={s.big} y={low ? 560 : 1260} size={low ? 96 : 112} /></div>;
   return null;
 }
 
@@ -479,7 +663,7 @@ export function City({ audio, handle, total, scenes }: CityProps) {
     const until = Math.round((scenes[i + 1] ? scenes[i + 1].start : total + 0.6) * fps);
     return { ...s, from, frames: Math.max(1, until - from) };
   });
-  const blur = cameraAt(timed, frame).whip * 34;
+  const blur = cameraAt(timed, frame, fps).whip * 34;
   const { lib, err } = useAssets();
   return (
     <AbsoluteFill style={{ background: SKY }}>

@@ -26,10 +26,10 @@ const demoSample: DemoProps = { audio: "work/test.mp3", handle: "@yourhandle", t
 // hand-made props for previewing the city with `npx remotion still` before any script exists
 const citySample: CityProps = { audio: "sfx/pop.wav", handle: "@bryzdaily", total: 18, scenes: [
   { kind: "hook", say: "Why do traffic jams appear out of nowhere?", start: 0, end: 3, words: [], set: "highway", shot: "aerial", traffic: { level: 0.3 }, big: "Jams from nowhere" },
-  { kind: "line", say: "One driver taps the brakes.", start: 3, end: 6, words: [], set: "highway", shot: "reaction", reaction: { do: "no" }, traffic: { level: 0.8 } },
+  { kind: "line", say: "One driver taps the brakes.", start: 3, end: 6, words: [], set: "highway", shot: "chase", traffic: { level: 0.6 }, brake: { at: 3.8 } },
   { kind: "line", say: "So the city adds a lane.", start: 6, end: 9, words: [], set: "highway", shot: "orbit", traffic: { level: 0.9 }, build: { what: "lane", at: 6.5 } },
   { kind: "line", say: "People move farther out.", start: 9, end: 12, words: [], set: "suburb", shot: "aerial", traffic: { level: 0.3 }, build: { what: "houses", at: 9.4 } },
-  { kind: "line", say: "Downtown fills up.", start: 12, end: 15, words: [], set: "downtown", shot: "aerial", traffic: { level: 0.4, to: 0.9, at: 13 } },
+  { kind: "line", say: "Downtown fills up.", start: 12, end: 15, words: [], set: "downtown", shot: "chase", traffic: { level: 0.55 } },
   { kind: "end", say: "And shoppers keep coming.", start: 15, end: 18, words: [], set: "store", shot: "street", people: { count: 6, do: "enter", at: 15.2 }, traffic: { level: 0.4 }, big: "Would you shop here?" },
 ] };
 
