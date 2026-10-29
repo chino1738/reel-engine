@@ -17,8 +17,9 @@ import { loadFont as loadInter } from "@remotion/google-fonts/Inter";
 const { fontFamily: SANS } = loadInter("normal", { weights: ["800"], subsets: ["latin", "latin-ext"] });
 const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
 
-type SetName = "highway" | "downtown" | "suburb" | "store";
-type Shot = "aerial" | "street" | "chase" | "orbit" | "reaction";
+type SetName = "highway" | "downtown" | "suburb" | "store" | "track";
+type Shot = "aerial" | "street" | "chase" | "orbit" | "reaction" | "driver" | "scientist";
+type Mood = "angry" | "bored" | "shocked" | "relieved";
 export type CityScene = DataScene & {
   set?: SetName;
   shot?: Shot;
@@ -27,6 +28,8 @@ export type CityScene = DataScene & {
   build?: { what?: "lane" | "tower" | "houses"; at?: number };
   people?: { count?: number; do?: "walk" | "run" | "enter"; at?: number };
   reaction?: { do?: "no" | "yes" | "idle" | "pick-up" };
+  mood?: Mood; // driver close-ups
+  scientists?: { do?: "instruct" | "watch" | "cheer"; bubble?: string }; // test track
 };
 export type CityProps = { audio: string; handle: string; total: number; scenes: CityScene[] };
 type Timed = CityScene & { from: number; frames: number };
@@ -40,6 +43,7 @@ const ORIGIN: Record<SetName, THREE.Vector3> = {
   downtown: new THREE.Vector3(0, 0, -240),
   suburb: new THREE.Vector3(0, 0, 240),
   store: new THREE.Vector3(0, 0, -240), // the store is a shop front inside downtown
+  track: new THREE.Vector3(320, 0, 0), // a ring road in a field, for experiments
 };
 const setOf = (s: CityScene): SetName => s.set ?? "highway";
 const hash = (n: number) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
@@ -64,6 +68,7 @@ const ASSETS: Record<string, string> = {
   drive: "city/suburban/driveway-short.glb",
   fence: "city/suburban/fence-1x4.glb",
   awning: "city/commercial/detail-awning-wide.glb",
+  trackCone: "city/cars/cone.glb",
   ...Object.fromEntries(CARS.map((c) => [c, `city/cars/${c}.glb`])),
   ...Object.fromEntries(SHOPS.map((c) => [c, `city/commercial/${c}.glb`])),
   ...Object.fromEntries(TOWERS.map((c) => [c, `city/commercial/${c}.glb`])),
@@ -96,17 +101,23 @@ function Model({ lib, name, ...rest }: { lib: Lib; name: string } & ThreeElement
 
 // an animated character: its own clone + mixer, posed at an exact time each frame
 const PERSON_H = 1.6; // world units; a car is ~0.9 tall, a shop ~5
-function Person({ lib, name, clip, time, size = 1, ...rest }: { lib: Lib; name: string; clip: string; time: number; size?: number } & ThreeElements["group"]) {
-  const { obj, mixer } = useMemo(() => {
+function Person({ lib, name, clip, time, size = 1, head, lean = 0, ...rest }: { lib: Lib; name: string; clip: string; time: number; size?: number; head?: { yaw?: number; pitch?: number }; lean?: number } & ThreeElements["group"]) {
+  const { obj, mixer, joints } = useMemo(() => {
     const o = lib[name].scene.clone(true);
-    return { obj: o, mixer: new THREE.AnimationMixer(o) };
+    // rest pose of the joints we nudge by hand, so the nudges never pile up frame after frame
+    const joints = ["head", "torso"].map((n) => { const j = o.getObjectByName(n); return j ? { j, r: j.rotation.clone() } : null; }).filter(Boolean) as { j: THREE.Object3D; r: THREE.Euler }[];
+    return { obj: o, mixer: new THREE.AnimationMixer(o), joints };
   }, [lib, name]);
+  for (const { j, r } of joints) j.rotation.copy(r);
   const anim = lib[name].animations.find((a) => a.name === clip) ?? lib[name].animations.find((a) => a.name === "idle");
   if (anim) {
     mixer.stopAllAction();
     mixer.clipAction(anim).play();
     mixer.setTime(time % anim.duration);
   }
+  const h = obj.getObjectByName("head"), torso = obj.getObjectByName("torso");
+  if (h && head) { h.rotation.y += head.yaw ?? 0; h.rotation.x += head.pitch ?? 0; }
+  if (torso && lean) torso.rotation.x += lean;
   const k = (PERSON_H / (lib[name].userData.height || 1)) * size;
   return <group {...rest}><group scale={k}><primitive object={obj} /></group></group>;
 }
@@ -126,7 +137,8 @@ function densityAt(s: Timed, local: number, fps: number) {
    backwards through the queue, and cars can never overlap. Downtown intersections run on lights. */
 
 // `show` is the stretch of the loop that's on the map; outside it cars are hidden and can spawn
-type Lane = { id: number; a: THREE.Vector3; dir: THREE.Vector3; len: number; show: [number, number]; opensAt?: number; stops?: number[]; phase?: 0 | 1 };
+type Lane = { id: number; a: THREE.Vector3; dir: THREE.Vector3; len: number; show: [number, number]; opensAt?: number; stops?: number[]; phase?: 0 | 1;
+  ring?: { c: THREE.Vector3; r: number }; count?: number; headway?: number };
 type Car = { id: number; u: number; v: number; a: number };
 
 const CAR_LEN = 1.75, GAP0 = 0.9, HEADWAY = 1.0, ACC = 1.2, DEC = 2.4, V0 = 9; // world units (~2.8 m) and seconds
@@ -140,7 +152,8 @@ type Sim = { lanes: LaneSim[]; heroLane?: number; hero?: number; braker?: number
 
 function simulateLane(ln: Lane, s: Timed, fps: number, brakeFrame: number, pickBraker?: (cars: Car[]) => number | undefined, pickHero?: (cars: Car[]) => number | undefined) {
   const nmax = Math.floor(ln.len / (CAR_LEN + GAP0 + 0.4));
-  const target = (f: number) => (ln.opensAt !== undefined && f < ln.opensAt ? 0 : Math.round(densityAt(s, Math.max(0, f), fps) * nmax));
+  const target = (f: number) => (ln.count !== undefined ? ln.count : ln.opensAt !== undefined && f < ln.opensAt ? 0 : Math.round(densityAt(s, Math.max(0, f), fps) * nmax));
+  const headway = ln.headway ?? HEADWAY;
   let cars: (Car & { v0: number })[] = [];
   let next = 0;
   const n0 = target(-PREROLL);
@@ -165,7 +178,7 @@ function simulateLane(ln: Lane, s: Timed, fps: number, brakeFrame: number, pickB
             const dl = (((st - c.u - CAR_LEN / 2) % ln.len) + ln.len) % ln.len;
             if (dl < gap && dl < 30 && c.v * c.v / (2 * 6) < dl + 0.5) { gap = dl; vl = 0; }
           }
-        const sStar = GAP0 + Math.max(0, c.v * HEADWAY + (c.v * (c.v - vl)) / (2 * Math.sqrt(ACC * DEC)));
+        const sStar = GAP0 + Math.max(0, c.v * headway + (c.v * (c.v - vl)) / (2 * Math.sqrt(ACC * DEC)));
         c.a = ACC * (1 - Math.pow(c.v / c.v0, 4) - Math.pow(sStar / Math.max(gap, 0.05), 2));
         if (c.id === braker && f >= brakeFrame && f < brakeUntil) c.a = -7; // the driver who taps the brakes
         c.a = Math.max(-9, c.a);
@@ -204,14 +217,19 @@ function simulateLane(ln: Lane, s: Timed, fps: number, brakeFrame: number, pickB
 }
 
 const simCache = new Map<string, Sim>();
-const laneAt = (ln: Lane, u: number) => ln.a.clone().addScaledVector(ln.dir, u);
+const laneAt = (ln: Lane, u: number) => {
+  if (!ln.ring) return ln.a.clone().addScaledVector(ln.dir, u);
+  const th = u / ln.ring.r;
+  return new THREE.Vector3(ln.ring.c.x + Math.cos(th) * ln.ring.r, 0, ln.ring.c.z + Math.sin(th) * ln.ring.r);
+};
+const dirAt = (ln: Lane, u: number) => (ln.ring ? new THREE.Vector3(-Math.sin(u / ln.ring.r), 0, Math.cos(u / ln.ring.r)) : ln.dir);
 
 function simFor(s: Timed, fps: number): Sim {
   const key = `${s.from}|${s.frames}|${setOf(s)}|${s.shot}`;
   const hit = simCache.get(key);
   if (hit) return hit;
   const lanes = lanesFor(s, fps);
-  const brakeFrame = s.brake ? atFrame(s, s.brake.at, fps, 0.3) : -1e9;
+  const brakeFrame = s.brake ? atFrame(s, s.brake.at, fps, 0.3) : setOf(s) === "track" ? Math.round(s.frames * 0.3) : -1e9;
   const heroLane = s.shot === "aerial" || s.shot === "orbit" ? NEAR_LANE[setOf(s)] : HERO_LANE[setOf(s)];
   const sim: Sim = { lanes: [], heroLane };
   for (const ln of lanes) {
@@ -247,9 +265,15 @@ function Traffic({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
   const out: React.ReactNode[] = [];
   for (const { lane: ln, frames } of sim.lanes) {
     const cars = frames[Math.max(0, Math.min(local, frames.length - 1))] ?? [];
-    const yaw = Math.atan2(ln.dir.x, ln.dir.z);
     for (const c of cars) {
       if (hidden(ln, c.u)) continue;
+      const d = dirAt(ln, c.u);
+      const yaw = Math.atan2(d.x, d.z);
+      if (s.shot === "driver" && ln.id === sim.heroLane && c.id === sim.hero) {
+        const p = laneAt(ln, c.u);
+        out.push(<group key="cockpit" position={[p.x, 0.02, p.z]} rotation={[0, yaw, 0]}><Cockpit lib={lib} s={s} local={local} /></group>);
+        continue;
+      }
       // ease in/out at the map edge instead of popping
       const edge = Math.min(c.u - ln.show[0], ln.show[1] - c.u);
       const sc = Math.min(1, edge / 1.5);
@@ -299,14 +323,20 @@ const CAR_FRONT = 1; // the car kit's models face +z
 /* ── roads as lanes, per set ── */
 
 const MARGIN = 14; // off-map run-out at each end of a road, where cars wait out of sight
-const HERO_LANE: Record<SetName, number> = { highway: 0, downtown: 108, store: 108, suburb: 300 };
+const HERO_LANE: Record<SetName, number> = { highway: 0, downtown: 108, store: 108, suburb: 300, track: 400 };
 // on drone/orbit shots the brake happens in the lane nearest the camera, so the wave is easy to follow
-const NEAR_LANE: Record<SetName, number> = { highway: 5 /* outer lane of the 3rd strip */, downtown: 108, store: 108, suburb: 300 };
-const FOCUS_X: Record<SetName, number> = { highway: 6, downtown: 0, store: 0, suburb: 0 };
+const NEAR_LANE: Record<SetName, number> = { highway: 5 /* outer lane of the 3rd strip */, downtown: 108, store: 108, suburb: 300, track: 400 };
+const FOCUS_X: Record<SetName, number> = { highway: 6, downtown: 0, store: 0, suburb: 0, track: 10 };
 
 function lanesFor(s: Timed, fps: number): Lane[] {
   const set = setOf(s);
   const lanes: Lane[] = [];
+  if (set === "track") {
+    // the 2008 Nagoya experiment: 22 cars on a 230 m ring (89 world units), told to hold a steady speed
+    const len = 2 * Math.PI * TRACK.r;
+    lanes.push({ id: 400, a: new THREE.Vector3(), dir: X, len, show: [0, len], ring: { c: new THREE.Vector3(), r: TRACK.r }, count: 22, headway: 0.5 });
+    return lanes;
+  }
   if (set === "highway") {
     const L = HWY.len * T;
     const building = s.build?.what === "lane";
@@ -480,6 +510,131 @@ function Suburb({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
   return <>{items}<Traffic lib={lib} s={s} local={local} /></>;
 }
 
+/* ── the driver close-up: inside the hero car, the jam through the glass behind them ── */
+
+const HERO_RED = "#D63A2F";
+const DRIVER = { x: 0.34, z: -0.2 }; // US cars: driver on the left (+x when the car faces +z)
+const HONKS = [0.45, 1.5, 2.6]; // seconds into an angry shot when they lean on the horn
+
+// how hard they're leaning on the horn right now (0..1), for angry drivers
+const honkAt = (t: number) => Math.max(0, ...HONKS.map((h) => (t >= h && t < h + 0.35 ? 1 - (t - h) / 0.35 : 0)));
+
+function Cockpit({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
+  const { fps } = useVideoConfig();
+  const t = local / fps;
+  const mood = s.mood ?? "angry";
+  const honk = mood === "angry" ? honkAt(t) : 0;
+  const shake = mood === "angry" && t % 1.5 > 0.8 ? Math.sin(t * 22) * 0.4 : 0; // "unbelievable"
+  const head =
+    mood === "angry" ? { yaw: shake, pitch: honk * 0.25 } :
+    mood === "bored" ? { yaw: Math.sin(t * 0.9) * 0.15, pitch: 0.38 } :
+    mood === "shocked" ? { yaw: 0, pitch: -0.28 * Math.min(1, t * 5) } :
+    { yaw: 0, pitch: Math.sin(t * 5) * 0.18 }; // relieved: nodding along
+  const lean = mood === "angry" ? honk * 0.45 : mood === "shocked" ? -0.25 * Math.min(1, t * 5) : mood === "bored" ? 0.12 : 0;
+  const body = (args: [number, number, number], pos: [number, number, number], color = HERO_RED, rot: [number, number, number] = [0, 0, 0]) => (
+    <mesh position={pos} rotation={rot} castShadow receiveShadow><boxGeometry args={args} /><meshStandardMaterial color={color} roughness={0.45} metalness={0.15} /></mesh>
+  );
+  const hx = DRIVER.x, hy = 1.42, hz = DRIVER.z;
+  return (
+    <group>
+      {body([1.7, 0.6, 3.4], [0, 0.42, 0])}
+      {body([1.66, 0.22, 1.1], [0, 0.82, 1.15])}
+      {body([1.4, 0.24, 0.36], [0, 1.0, 0.62], "#262A31")}
+      {body([0.56, 1.0, 0.18], [hx, 1.0, hz - 0.32], "#30343C")}
+      {body([0.56, 1.0, 0.18], [-hx, 1.0, hz - 0.32], "#30343C")}
+      {body([1.7, 0.08, 1.5], [0, 1.98, -0.35])}
+      {[-0.8, 0.8].map((x) => <group key={x}>{body([0.09, 0.8, 0.09], [x, 1.62, 0.55], HERO_RED, [-0.55, 0, 0])}{body([0.09, 0.95, 0.09], [x, 1.5, -1.05])}</group>)}
+      {/* the wheel jolts when they hit the horn */}
+      <mesh position={[hx, 1.16 - honk * 0.03, 0.42]} rotation={[-1.05, 0, Math.sin(t * 3) * 0.05]}><torusGeometry args={[0.2, 0.035, 8, 24]} /><meshStandardMaterial color="#1C1F24" /></mesh>
+      <mesh position={[0, 1.6, 0.6]} rotation={[-0.55, 0, 0]}><planeGeometry args={[1.5, 0.78]} /><meshStandardMaterial color="#BFE6FF" transparent opacity={0.1} side={THREE.DoubleSide} depthWrite={false} /></mesh>
+      <Person lib={lib} name="character-a" clip="drive" time={t} position={[hx, 0.55, hz]} head={head} lean={lean} size={0.95} />
+      {mood === "angry" && <AngerMarks t={t} at={[hx, hy + 0.55, hz]} />}
+      {mood === "shocked" && t > 0.15 && <Bang t={t - 0.15} at={[hx, hy + 0.7, hz]} />}
+    </group>
+  );
+}
+
+// comic anger: red "vein" crosses pop by the head on every honk, steam puffs off the top
+function AngerMarks({ t, at }: { t: number; at: [number, number, number] }) {
+  const out: React.ReactNode[] = [];
+  HONKS.forEach((h, k) => {
+    const a = t - h;
+    if (a < 0 || a > 0.9) return;
+    const p = Math.min(1, a * 8) * (a > 0.6 ? 1 - (a - 0.6) / 0.3 : 1);
+    out.push(
+      <group key={`v${k}`} position={[at[0] + (k % 2 ? 0.28 : -0.24), at[1] + 0.05, at[2] + 0.1]} rotation={[0, 0, 0.4 * (k % 2 ? 1 : -1)]} scale={p * 0.9}>
+        {[0, Math.PI / 2].map((r) => <mesh key={r} rotation={[0, 0, r]}><boxGeometry args={[0.24, 0.06, 0.03]} /><meshBasicMaterial color="#FF2D2D" toneMapped={false} /></mesh>)}
+      </group>,
+    );
+  });
+  for (let k = 0; k < 4; k++) {
+    const a = (t * 1.3 + k * 0.25) % 1;
+    out.push(<mesh key={`s${k}`} position={[at[0] + Math.sin(k * 2.1) * 0.12, at[1] + 0.15 + a * 0.7, at[2]]} scale={0.08 + a * 0.12}><sphereGeometry args={[1, 10, 8]} /><meshStandardMaterial color="#FFFFFF" transparent opacity={0.75 * (1 - a)} depthWrite={false} /></mesh>);
+  }
+  return <>{out}</>;
+}
+
+function Bang({ t, at }: { t: number; at: [number, number, number] }) {
+  const p = Math.min(1, t * 6);
+  const bob = Math.sin(t * 9) * 0.03;
+  return (
+    <group position={[at[0], at[1] + bob, at[2]]} scale={p * (1 + 0.25 * Math.max(0, 1 - t * 4))}>
+      <mesh position={[0, 0.14, 0]}><boxGeometry args={[0.09, 0.3, 0.05]} /><meshBasicMaterial color="#FFC93C" toneMapped={false} /></mesh>
+      <mesh position={[0, -0.09, 0]}><boxGeometry args={[0.09, 0.09, 0.05]} /><meshBasicMaterial color="#FFC93C" toneMapped={false} /></mesh>
+    </group>
+  );
+}
+
+/* ── the test track: a ring road in a field, scientists in the middle running the experiment ── */
+
+const TRACK = { r: 14.2 };
+const SCIENTISTS = [
+  { name: "character-k", at: new THREE.Vector3(6.4, 0, 6.4), role: "megaphone" },
+  { name: "character-m", at: new THREE.Vector3(-4.5, 0, 5.2), role: "clipboard" },
+  { name: "character-h", at: new THREE.Vector3(-1.5, 0, -6.5), role: "watch" },
+] as const;
+
+const MEGA = (() => {
+  const at = SCIENTISTS[0].at, out = at.clone().normalize();
+  return { pos: at.clone().addScaledVector(out, 0.42).setY(1.42), q: new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), out.clone().negate()) };
+})();
+
+function Track({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
+  const { fps } = useVideoConfig();
+  const t = local / fps;
+  const act = s.scientists?.do ?? "watch";
+  const r = TRACK.r;
+  const cones: React.ReactNode[] = [];
+  for (let k = 0; k < 24; k++) {
+    const th = (k / 24) * Math.PI * 2;
+    cones.push(<Model key={k} lib={lib} name="trackCone" position={[Math.cos(th) * (r - 1.75), 0, Math.sin(th) * (r - 1.75)]} scale={0.9} />);
+  }
+  return (
+    <>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]} receiveShadow><ringGeometry args={[r - 1.4, r + 1.4, 128]} /><meshStandardMaterial color="#4B505B" roughness={0.9} /></mesh>
+      {[r - 1.35, r + 1.28].map((rr) => <mesh key={rr} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}><ringGeometry args={[rr, rr + 0.08, 128]} /><meshBasicMaterial color="#F2F2F2" /></mesh>)}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.005, 0]} receiveShadow><circleGeometry args={[r - 1.4, 64]} /><meshStandardMaterial color="#9CCB7A" roughness={1} /></mesh>
+      {cones}
+      {/* research tent with a table and a laptop */}
+      <group position={[-2.5, 0, -2.5]}>
+        {[[-1.3, -1.3], [1.3, -1.3], [-1.3, 1.3], [1.3, 1.3]].map(([x, z]) => <mesh key={`${x}${z}`} position={[x, 1.2, z]} castShadow><cylinderGeometry args={[0.05, 0.05, 2.4, 6]} /><meshStandardMaterial color="#DADDE2" /></mesh>)}
+        <mesh position={[0, 2.75, 0]} rotation={[0, Math.PI / 4, 0]} castShadow><coneGeometry args={[2.1, 0.8, 4]} /><meshStandardMaterial color="#F4F6F8" roughness={0.8} /></mesh>
+        <mesh position={[0, 0.75, 0]} castShadow><boxGeometry args={[1.8, 0.08, 0.9]} /><meshStandardMaterial color="#8B6B4A" /></mesh>
+        <mesh position={[0.2, 0.9, 0]} rotation={[-0.3, 0.3, 0]}><boxGeometry args={[0.55, 0.36, 0.03]} /><meshStandardMaterial color="#2A2E35" emissive="#5AA9FF" emissiveIntensity={0.4} /></mesh>
+      </group>
+      {SCIENTISTS.map((sc, k) => {
+        // they face the track; the megaphone lead gestures out at the drivers while instructing
+        const yaw = Math.atan2(sc.at.x, sc.at.z);
+        const clip = act === "cheer" ? "emote-yes" : sc.role === "megaphone" && act === "instruct" ? "interact-right" : sc.role === "clipboard" ? "holding-right" : "idle";
+        return <Person key={k} lib={lib} name={sc.name} clip={clip} time={t + k * 0.4} position={[sc.at.x, 0.02, sc.at.z]} rotation={[0, yaw, 0]} head={sc.role === "watch" ? { yaw: Math.sin(t * 0.8) * 0.5 } : undefined} />;
+      })}
+      {/* the megaphone: narrow end at the mouth, bell pointing out at the drivers */}
+      <mesh position={MEGA.pos} quaternion={MEGA.q}><coneGeometry args={[0.17, 0.44, 14, 1, true]} /><meshStandardMaterial color="#F5C542" side={THREE.DoubleSide} /></mesh>
+      <Traffic lib={lib} s={s} local={local} />
+    </>
+  );
+}
+
 /* ── the reaction close-up: one person, front and centre, the set behind them ── */
 
 const REACT_CLIP = { no: "emote-no", yes: "emote-yes", idle: "idle", "pick-up": "pick-up" } as const;
@@ -487,6 +642,7 @@ const REACT_CLIP = { no: "emote-no", yes: "emote-yes", idle: "idle", "pick-up": 
 function reactionSpot(set: SetName) {
   if (set === "highway") return { p: new THREE.Vector3(2, 0, -T * 1.4), toward: 1 };
   if (set === "suburb") return { p: new THREE.Vector3(2.0, 0, -2.3), toward: 1 }; // in the gap between two houses, street behind
+  if (set === "track") return { p: SCIENTISTS[1].at.clone(), toward: 1 };
   return { p: dtPos(STORE.i, STORE.j).add(new THREE.Vector3(T * 0.7, 0, T * 0.9)), toward: -1 }; // store sidewalk, shop behind
 }
 
@@ -506,6 +662,34 @@ function shotAt(s: Timed, local: number, fps: number) {
   const set = setOf(s);
   const o = ORIGIN[set];
   const at = (x: number, y: number, z: number) => new THREE.Vector3(o.x + x, o.y + y, o.z + z);
+  if (s.shot === "driver") {
+    // outside the windshield on the driver's side, looking back in at them; the jam behind
+    const sim = simFor(s, fps);
+    const ls = sim.lanes.find((l) => l.lane.id === sim.heroLane);
+    const c = ls?.frames[Math.min(local, (ls?.frames.length ?? 1) - 1)]?.find((x) => x.id === sim.hero);
+    if (ls && c) {
+      const p = laneAt(ls.lane, c.u), d = dirAt(ls.lane, c.u);
+      const side = new THREE.Vector3(d.z, 0, -d.x); // the car's +x (driver side) in world space
+      const head = p.clone().add(o).addScaledVector(side, DRIVER.x).addScaledVector(d, DRIVER.z).setY(1.5); // lanes are set-local
+      // chest-up through the windshield: wheel, the window frame, and the stalled traffic behind them
+      const push = 1 - k * 0.1;
+      return { pos: head.clone().addScaledVector(d, 3.4 * push).addScaledVector(side, 0.9).setY(1.85), look: head.clone().setY(1.25) };
+    }
+  }
+  if (s.shot === "scientist" || (set === "track" && s.shot === "reaction")) {
+    // from the track side looking in at the lead: the tent and the far side of the ring behind them
+    const lead = SCIENTISTS[0].at;
+    const out = lead.clone().normalize(), tan = new THREE.Vector3(-out.z, 0, out.x);
+    const r = 3.2 - k * 0.4;
+    return { pos: at(lead.x + out.x * r + tan.x * 1.1, 1.8, lead.z + out.z * r + tan.z * 1.1), look: at(lead.x, 1.35, lead.z) };
+  }
+  if (set === "track") {
+    switch (s.shot) {
+      case "street": { const a = 1.1 + k * 0.25; return { pos: at(Math.cos(a) * (TRACK.r + 6), 1.9, Math.sin(a) * (TRACK.r + 6)), look: at(0, 1, 0) }; }
+      case "orbit": { const a = 0.3 + k * 0.8; return { pos: at(Math.cos(a) * 30, 13, Math.sin(a) * 30), look: at(0, 0, 0) }; }
+      default: { const a = k * 0.5; return { pos: at(Math.sin(a) * 14, 44, 18 + Math.cos(a) * 6), look: at(0, 0, 0) }; }
+    }
+  }
   if (s.shot === "reaction") {
     const { p, toward } = reactionSpot(set);
     const r = 3.4 - k * 0.5; // slow push-in on the face
@@ -575,6 +759,8 @@ function solids(set: SetName): Box[] {
         out.push(box(x - T * 0.8, side * T * 2.8, 0.8, 0.8, 6)); // yard tree
       }
     }
+  } else if (set === "track") {
+    out.push(box(-2.5, -2.5, 1.5, 1.5, 3.2));
   } else {
     for (let k = 0; k < HWY.len; k += 2) {
       const x = (k - HWY.len / 2) * T;
@@ -606,6 +792,7 @@ function guard(pos: THREE.Vector3, look: THREE.Vector3, set: SetName, low: boole
   return p;
 }
 
+const LOW = new Set(["reaction", "street", "chase", "scientist"]); // the driver cam is meant to look through glass
 const WHIP = 10, SLAM = 20;
 function cameraAt(scenes: Timed[], f: number, fps: number) {
   let i = scenes.findIndex((_, k) => f < (scenes[k + 1]?.from ?? Infinity));
@@ -613,13 +800,13 @@ function cameraAt(scenes: Timed[], f: number, fps: number) {
   const s = scenes[i];
   const local = f - s.from;
   let { pos, look } = shotAt(s, local, fps);
-  pos = guard(pos, look, setOf(s), s.shot === "reaction" || s.shot === "street" || s.shot === "chase");
+  pos = guard(pos, look, setOf(s), LOW.has(s.shot ?? ""));
   let roll = 0, whip = 0;
   if (i > 0 && local < WHIP) {
     // whip pan: hangs, snaps through, settles; blur follows the speed
     const ps = scenes[i - 1];
     const prev = shotAt(ps, ps.frames, fps);
-    prev.pos = guard(prev.pos, prev.look, setOf(ps), ps.shot === "reaction" || ps.shot === "street" || ps.shot === "chase");
+    prev.pos = guard(prev.pos, prev.look, setOf(ps), LOW.has(ps.shot ?? ""));
     const ease = Easing.inOut(Easing.exp);
     const u = local / WHIP, t = ease(u);
     pos = prev.pos.clone().lerp(pos, t);
@@ -645,7 +832,7 @@ function Rig({ pos, look, roll }: { pos: THREE.Vector3; look: THREE.Vector3; rol
   return null;
 }
 
-const SETS: Record<SetName, (p: { lib: Lib; s: Timed; local: number }) => React.ReactNode> = { highway: Highway, downtown: Downtown, store: Downtown, suburb: Suburb };
+const SETS: Record<SetName, (p: { lib: Lib; s: Timed; local: number }) => React.ReactNode> = { highway: Highway, downtown: Downtown, store: Downtown, suburb: Suburb, track: Track };
 
 function World({ scenes, lib }: { scenes: Timed[]; lib: Lib }) {
   const f = useCurrentFrame();
@@ -705,12 +892,27 @@ function CityCaption({ scene }: { scene: Timed }) {
   );
 }
 
+// a comic speech bubble for the scientist on the megaphone
+function Bubble({ text }: { text: string }) {
+  const f = useCurrentFrame();
+  const p = spring({ frame: f - 8, fps: 30, config: { damping: 11, stiffness: 180 } });
+  return (
+    <div style={{ position: "absolute", top: 470, left: 0, right: 0, display: "flex", justifyContent: "center", scale: String(p), transformOrigin: "50% 100%" }}>
+      <div style={{ position: "relative", background: "#FFFFFF", border: "6px solid #161616", borderRadius: 40, padding: "22px 34px", fontFamily: SANS, fontWeight: 800, fontSize: 64, color: "#161616", maxWidth: 820, textAlign: "center", boxShadow: "0 8px 0 rgba(0,0,0,0.2)" }}>
+        {text}
+        <div style={{ position: "absolute", bottom: -38, left: "58%", width: 0, height: 0, borderLeft: "26px solid transparent", borderRight: "26px solid transparent", borderTop: "38px solid #161616" }} />
+      </div>
+    </div>
+  );
+}
+
 function Overlay({ s }: { s: Timed }) {
+  if (s.shot === "scientist" && s.scientists?.bubble) return <Bubble text={s.scientists.bubble} />;
   const outline = { WebkitTextStroke: "10px #161616", paintOrder: "stroke fill" } as React.CSSProperties;
   if (s.value !== undefined) return <div style={outline}><Counter scene={s} y={760} size={210} /></div>;
   // on low shots the action is mid-frame, so the headline sits up under the caption instead
   const low = s.shot === "chase" || s.shot === "street";
-  if (s.big && s.shot !== "reaction" && (s.kind === "line" || s.kind === "end" || s.kind === "hook")) return <div style={outline}><Statement text={s.big} y={low ? 560 : 1260} size={low ? 96 : 112} /></div>;
+  if (s.big && s.shot !== "reaction" && s.shot !== "driver" && (s.kind === "line" || s.kind === "end" || s.kind === "hook")) return <div style={outline}><Statement text={s.big} y={low ? 560 : 1260} size={low ? 96 : 112} /></div>;
   return null;
 }
 
@@ -741,6 +943,9 @@ export function City({ audio, handle, total, scenes }: CityProps) {
             <Overlay s={s} />
             <CityCaption scene={s} />
             {i > 0 && <Sequence from={-2} durationInFrames={14} layout="none"><Audio src={staticFile("sfx/whoosh.wav")} volume={0.3} /></Sequence>}
+            {s.shot === "driver" && (s.mood ?? "angry") === "angry" && HONKS.map((h, k) => (
+              <Sequence key={`h${k}`} from={Math.round(h * fps)} durationInFrames={14} layout="none"><Audio src={staticFile("sfx/honk.wav")} volume={0.35} /></Sequence>
+            ))}
             {sfxFor(s, fps).map((x, k) => (
               <Sequence key={k} from={Math.max(0, x.at)} durationInFrames={16} layout="none"><Audio src={staticFile(`sfx/${x.src}.wav`)} volume={x.vol} /></Sequence>
             ))}

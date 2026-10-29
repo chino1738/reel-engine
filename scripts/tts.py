@@ -8,6 +8,7 @@ import asyncio, json, subprocess, sys, tempfile, os
 
 FFMPEG = os.environ.get("FFMPEG", os.path.expanduser("~/projects/voice-claude-app/bin/ffmpeg"))
 TAIL = 0.5  # silence after the last word, so the outro can land
+BEAT = 0.15  # extra pause at every scene change, so each shot gets a moment to land
 
 
 async def voice_scene(text, voice, path, rate, pitch):
@@ -61,10 +62,25 @@ async def main(script_path, out_mp3, out_json, voice, rate, pitch):
         else:
             prev = scenes[i - 1]["words"]
             sc["start"] = (prev[-1]["e"] + w[0]["s"]) / 2 if prev and w else scenes[i - 1]["start"] + 0.5
+    # open up a beat at each scene change: cut the take at the cut points, insert silence, shift the timings
+    cuts = [sc["start"] for sc in scenes[1:]]
+    pieces = []
+    for i, (a, b) in enumerate(zip([0.0] + cuts, cuts + [None])):
+        seg = os.path.join(tmp, f"p{i}.wav")
+        rng = ["-ss", f"{a:.3f}"] + (["-to", f"{b:.3f}"] if b is not None else [])
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-i", raw, *rng, "-ar", "24000", "-ac", "1", seg], check=True)
+        pieces.append(seg)
+    for i, sc in enumerate(scenes):
+        shift = BEAT * i
+        sc["start"] += shift
+        sc["words"] = [{**w, "s": w["s"] + shift, "e": w["e"] + shift} for w in sc["words"]]
+    total += BEAT * (len(scenes) - 1)
     for i, sc in enumerate(scenes):
         sc["end"] = scenes[i + 1]["start"] if i + 1 < len(scenes) else total
-    subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-i", raw, "-af", f"apad=pad_dur={TAIL}",
-                    "-c:a", "libmp3lame", "-q:a", "3", out_mp3], check=True)
+    filt = "".join(f"[{i}:a]" + (f"apad=pad_dur={BEAT}[a{i}];" if i < len(pieces) - 1 else f"apad=pad_dur={TAIL}[a{i}];") for i in range(len(pieces)))
+    filt += "".join(f"[a{i}]" for i in range(len(pieces))) + f"concat=n={len(pieces)}:v=0:a=1[out]"
+    subprocess.run([FFMPEG, "-y", "-loglevel", "error", *sum([["-i", p] for p in pieces], []), "-filter_complex", filt,
+                    "-map", "[out]", "-c:a", "libmp3lame", "-q:a", "3", out_mp3], check=True)
     json.dump({"total": total, "scenes": scenes}, open(out_json, "w"), ensure_ascii=False)
 
 

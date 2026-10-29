@@ -61,8 +61,8 @@ const dataLike = style === "data" || style === "3d";
 const handle = flag("--handle", lang === "es" ? "@curiosidades" : "@bryzdaily");
 // voices he picked 10/28: brian (default) and ava; both Multilingual, tuned for energy
 const VOICES = {
-  brian: { id: "en-US-BrianMultilingualNeural", rate: "+18%", pitch: "+3Hz" },
-  ava: { id: "en-US-AvaMultilingualNeural", rate: "+16%", pitch: "+0Hz" },
+  brian: { id: "en-US-BrianMultilingualNeural", rate: "+6%", pitch: "+3Hz" },
+  ava: { id: "en-US-AvaMultilingualNeural", rate: "+5%", pitch: "+0Hz" },
   jorge: { id: "es-MX-JorgeNeural", rate: "+12%", pitch: "+0Hz" },
 };
 // --auto alternates Brian / Ava by day so we learn which one performs
@@ -120,8 +120,10 @@ ${readFileSync(join(ROOT, "data/fluent-names.txt"), "utf8").split("\n").join(" |
 const CITY_KINDS = `THIS REEL HAPPENS IN ONE LITTLE 3D CITY (blocky low-poly toy town). Every scene is a shot in that city that SHOWS what is being said, like a little film.
 Scene fields:
 - "kind": "hook" (first) | "line" | "count" | "end" (last: asks a question for the comments, then invites a follow).
-- "set": "highway" (wide multi-lane highway with trees) | "downtown" (street grid, shops, towers) | "suburb" (street of houses with yards) | "store" (one shop front on a downtown street).
-- "shot": "aerial" (drone, high) | "street" (low, at street level) | "chase" (behind a car in traffic: highway or downtown) | "orbit" (slow circle around the set) | "reaction" (close-up of one person reacting, the set behind them).
+- "set": "highway" (wide multi-lane highway with trees) | "downtown" (street grid, shops, towers) | "suburb" (street of houses with yards) | "store" (one shop front on a downtown street) | "track" (a circular test track in a field with scientists in the middle: use it for experiments and studies).
+- "shot": "aerial" (drone, high) | "street" (low, at street level) | "chase" (behind a car in traffic: highway or downtown) | "orbit" (slow circle around the set) | "reaction" (close-up of one person reacting, the set behind them) | "driver" (close-up of a driver in their car, the traffic behind them; highway or track only; give "mood") | "scientist" (track only: close-up of the lead scientist on a megaphone; give "scientists").
+- "mood" (driver shots): "angry" (honks, shakes head, steam) | "bored" (slumped) | "shocked" | "relieved".
+- "scientists" (track set): {"do": "instruct" | "watch" | "cheer", "bubble": max 5 words they say into the megaphone, only on "scientist" shots}.
 - "traffic": {"level": 0-1 (0 empty, 0.5 busy, 1 gridlock), "to": optional new level, "on": the exact word in "say" where it changes}.
 - "brake": {"on": exact word} = one driver in view slams the brakes on that word; their brake lights flash and the cars behind brake one after another (a real slowdown wave). Use it whenever the words are about braking, slowing or a chain reaction; best with "chase" (we ride behind the car that brakes) or "aerial"/"orbit" (we watch the wave roll back), at traffic level 0.5+.
 - "build": {"what": "lane" (highway: a new lane is laid) | "tower" (downtown: a skyscraper rises) | "houses" (suburb: new houses spread out), "on": exact word}.
@@ -130,6 +132,7 @@ Scene fields:
 - "big": on-screen words, max 5, for hook/line/end (leave it out on reaction shots).
 - count scenes: "value" (number only), optional "prefix" ("$"), "suffix" ("%", " min"), "label" (max 6 words), "on" (word where the number is spoken).
 - "em": 1-2 words copied from "say" to highlight.
+DETAIL: every scene needs at least one small story action that supports its sentence: a driver getting angry, a brake, people walking in, scientists instructing or cheering, a lane being laid. Feelings go on "driver" or "reaction" shots; studies and experiments go on the "track" set.
 DIRECTING: the shot acts out the sentence, timed to the word ("more people pile on" → traffic rises ON "pile"; "they add a lane" → build lane ON "lane"; "shoppers walk in" → people enter ON "walk"). Change the set or the shot every scene. Use at least 3 different shots and 2 different sets. The reaction person is the viewer's stand-in (frustrated = "no", realisation = "yes"): use them 1-2 times. Open on a strong establishing shot (aerial or chase).
 Rules: 5-7 scenes. EVERY number must be real and from your sources; if you can't source a number, leave it out.`;
 const DATA_KINDS = `THIS IS A STAT-FLIP REEL: the numbers are the visuals. Story arc: a surprising or bad-sounding number → "sounds bad/weird, until you see why" → the number that flips it → the real reason → end on a question.
@@ -221,6 +224,7 @@ if (style === "city") {
   };
   for (const s of scenes) {
     if (Array.isArray(s.big)) s.big = s.big.join(" "); // the writer sometimes splits the headline into lines
+    if (s.shot === "driver" && s.set !== "highway" && s.set !== "track") s.set = "highway"; // the in-car shot needs open road around it
     for (const k of ["traffic", "build", "people", "brake"]) if (s[k]?.on) s[k].at = when(s, s[k].on);
     if (s.value !== undefined) {
       const w = [s.on, s.value].filter(Boolean).map((x) => when(s, x)).find((x) => x !== undefined);
