@@ -18,7 +18,8 @@ const { fontFamily: SANS } = loadInter("normal", { weights: ["800"], subsets: ["
 const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
 
 type SetName = "highway" | "downtown" | "suburb" | "store" | "track";
-type Shot = "aerial" | "street" | "chase" | "orbit" | "reaction" | "driver" | "scientist";
+type Shot = "aerial" | "street" | "chase" | "orbit" | "reaction" | "driver" | "scientist" | "follow" | "face" | "low" | "overhead";
+type ActorDo = "walk" | "run" | "jump" | "fall" | "point" | "cheer" | "no" | "sit" | "pick-up" | "idle" | "look";
 type Mood = "angry" | "bored" | "shocked" | "relieved";
 export type CityScene = DataScene & {
   set?: SetName;
@@ -30,9 +31,28 @@ export type CityScene = DataScene & {
   reaction?: { do?: "no" | "yes" | "idle" | "pick-up" };
   mood?: Mood; // driver close-ups
   scientists?: { do?: "instruct" | "watch" | "cheer"; bubble?: string }; // test track
+  // camera switches inside the scene, each on the word it's spoken (hard cuts, like an editor would)
+  cuts?: { at?: number; shot: Shot; mood?: Mood; reaction?: { do?: "no" | "yes" | "idle" | "pick-up" } }[];
+  // the main character: what they're doing, switching on spoken words
+  actor?: { at?: number; do: ActorDo }[];
+  // a red measuring bracket stuck to something in the world, popping in on its word
+  callout?: { label: string; target: "actor" | "car" | "gap" | "tower" | "house" | "lane"; at?: number };
 };
 export type CityProps = { audio: string; handle: string; total: number; scenes: CityScene[] };
-type Timed = CityScene & { from: number; frames: number };
+type Timed = CityScene & { from: number; frames: number; cutFrom?: number };
+// where the lens is this frame, set-local; World sets it before its children render
+const LENS = { pos: new THREE.Vector3() };
+
+// the angle on screen at this moment: the scene's shot, replaced by each cut once its word is spoken
+function viewAt(s: Timed, local: number, fps: number): Timed {
+  let v: Timed = s;
+  for (const c of s.cuts ?? []) {
+    if (c.at === undefined) continue;
+    const at = Math.round((c.at - s.start) * fps);
+    if (local >= at) v = { ...s, shot: c.shot, mood: c.mood ?? s.mood, reaction: c.reaction ?? s.reaction, cutFrom: at };
+  }
+  return v;
+}
 type Lib = Record<string, GLTF>;
 
 const T = 4; // world units per road tile (the kits are built on 1-unit tiles)
@@ -224,28 +244,30 @@ const laneAt = (ln: Lane, u: number) => {
 };
 const dirAt = (ln: Lane, u: number) => (ln.ring ? new THREE.Vector3(-Math.sin(u / ln.ring.r), 0, Math.cos(u / ln.ring.r)) : ln.dir);
 
+// One sim per scene, whatever the camera does: cutting between angles mid-scene never moves a car.
+// On a brake cue two drivers brake: the one just ahead of the hero car (seen from the chase and
+// driver cams) and the one nearest the middle of the near lane (seen from the drone).
 function simFor(s: Timed, fps: number): Sim {
-  const key = `${s.from}|${s.frames}|${setOf(s)}|${s.shot}`;
+  const key = `${s.from}|${s.frames}|${setOf(s)}`;
   const hit = simCache.get(key);
   if (hit) return hit;
   const lanes = lanesFor(s, fps);
   const brakeFrame = s.brake ? atFrame(s, s.brake.at, fps, 0.3) : setOf(s) === "track" ? Math.round(s.frames * 0.3) : -1e9;
-  const heroLane = s.shot === "aerial" || s.shot === "orbit" ? NEAR_LANE[setOf(s)] : HERO_LANE[setOf(s)];
+  const heroLane = HERO_LANE[setOf(s)], nearLane = NEAR_LANE[setOf(s)];
   const sim: Sim = { lanes: [], heroLane };
   for (const ln of lanes) {
-    if (ln.id !== heroLane) { sim.lanes.push({ lane: ln, frames: simulateLane(ln, s, fps, -1e9).frames }); continue; }
-    // the hero lane: the camera rides behind one car; in a chase the car just ahead of it brakes,
-    // otherwise whichever car is nearest the middle of the shot
     const focusU = (x: number) => (cars: Car[]) => cars.reduce<Car | undefined>((b, c) => (!b || Math.abs(laneAt(ln, c.u).x - x) < Math.abs(laneAt(ln, b.u).x - x) ? c : b), undefined)?.id;
-    let heroId: number | undefined;
-    const r = simulateLane(ln, s, fps, brakeFrame,
-      s.shot === "chase"
-        ? (cars) => { const sorted = [...cars].sort((x, y) => x.u - y.u); const i = sorted.findIndex((c) => c.id === heroId); return i >= 0 ? sorted[(i + 1) % sorted.length].id : undefined; }
-        : focusU(FOCUS_X[setOf(s)]),
-      (cars) => (heroId = focusU(FOCUS_X[setOf(s)] - 10)(cars)));
-    sim.lanes.push({ lane: ln, frames: r.frames });
-    sim.hero = r.hero;
-    sim.braker = r.braker;
+    if (ln.id === heroLane) {
+      let heroId: number | undefined;
+      const r = simulateLane(ln, s, fps, brakeFrame,
+        (cars) => { const sorted = [...cars].sort((x, y) => x.u - y.u); const i = sorted.findIndex((c) => c.id === heroId); return i >= 0 ? sorted[(i + 1) % sorted.length].id : undefined; },
+        (cars) => (heroId = focusU(FOCUS_X[setOf(s)] - 10)(cars)));
+      sim.lanes.push({ lane: ln, frames: r.frames });
+      sim.hero = r.hero;
+      sim.braker = r.braker;
+    } else if (ln.id === nearLane) {
+      sim.lanes.push({ lane: ln, frames: simulateLane(ln, s, fps, brakeFrame, focusU(FOCUS_X[setOf(s)])).frames });
+    } else sim.lanes.push({ lane: ln, frames: simulateLane(ln, s, fps, -1e9).frames });
   }
   simCache.set(key, sim);
   return sim;
@@ -267,11 +289,13 @@ function Traffic({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
     const cars = frames[Math.max(0, Math.min(local, frames.length - 1))] ?? [];
     for (const c of cars) {
       if (hidden(ln, c.u)) continue;
+      const cp = laneAt(ln, c.u);
+      if (!far && Math.hypot(cp.x - LENS.pos.x, cp.z - LENS.pos.z) < 2.4) continue; // never park a car on the lens
       const d = dirAt(ln, c.u);
       const yaw = Math.atan2(d.x, d.z);
       if (s.shot === "driver" && ln.id === sim.heroLane && c.id === sim.hero) {
         const p = laneAt(ln, c.u);
-        out.push(<group key="cockpit" position={[p.x, 0.02, p.z]} rotation={[0, yaw, 0]}><Cockpit lib={lib} s={s} local={local} /></group>);
+        out.push(<group key="cockpit" position={[p.x, 0.02, p.z]} rotation={[0, yaw, 0]}><Cockpit lib={lib} s={s} local={local - (s.cutFrom ?? 0)} /></group>);
         continue;
       }
       // ease in/out at the map edge instead of popping
@@ -433,7 +457,8 @@ function Downtown({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
       if (central && i === 4 && j === 4 && towerAt < Infinity) sy = Math.max(0.02, spring({ frame: local - towerAt, fps, config: { damping: 14, stiffness: 60 } }));
       const fit = name.includes("skyscraper") ? T * 0.68 : T * 0.96;
       tiles.push(<Model key={`b${i}-${j}`} lib={lib} name={name} position={p} rotation={[0, yaw, 0]} scale={[fit, fit * sy, fit]} />);
-      if (isStore) tiles.push(<Model key="awning" lib={lib} name="awning" position={[p.x, 0, p.z + T * 0.42]} scale={T * 0.96} />);
+      // the awning steps aside when the lens is right under it (it would cut across a close-up)
+      if (isStore && Math.hypot(LENS.pos.x - p.x, LENS.pos.z - (p.z + T * 0.42)) > 4.5) tiles.push(<Model key="awning" lib={lib} name="awning" position={[p.x, 0, p.z + T * 0.42]} scale={T * 0.96} />);
     }
   return (
     <>
@@ -458,6 +483,7 @@ function Walkers({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
   const start = atFrame(s, s.people.at, fps, 0.15);
   const run = s.people.do === "run";
   const out: React.ReactNode[] = [];
+  const nearLens = (x: number, z: number) => Math.hypot(x - LENS.pos.x, z - LENS.pos.z) < 2.2; // nobody walks into a close-up
   for (let k = 0; k < n; k++) {
     const t = (local - start - k * (run ? 3 : 7)) / fps; // seconds since this person set off
     if (t < 0) continue;
@@ -472,9 +498,11 @@ function Walkers({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
       const z = walkZ - Math.min(1.6, inT * speed);
       if (inT > 1.4) continue;
       const yaw = inT > 0 ? Math.PI : fromLeft ? Math.PI / 2 : -Math.PI / 2;
+      if (nearLens(x, z)) continue;
       out.push(<Person key={k} lib={lib} name={PEOPLE[k % PEOPLE.length]} clip="walk" time={t} position={[x, 0.05, z]} rotation={[0, yaw, 0]} size={inT > 1 ? Math.max(0.01, 1 - (inT - 1) / 0.4) : 1} />);
     } else {
       const x = sx + (fromLeft ? 1 : -1) * t * speed;
+      if (nearLens(x, walkZ + (k % 3) * 0.5)) continue;
       out.push(<Person key={k} lib={lib} name={PEOPLE[k % PEOPLE.length]} clip={run ? "sprint" : "walk"} time={t} position={[x, 0.05, walkZ + (k % 3) * 0.5]} rotation={[0, fromLeft ? Math.PI / 2 : -Math.PI / 2, 0]} />);
     }
   }
@@ -635,6 +663,179 @@ function Track({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
   );
 }
 
+/* ── the actor: one recurring main character who acts the story out ── */
+
+const ACTOR = "character-a"; // same face as the reaction close-ups, so viewers follow one person
+const ACT_CLIP: Record<ActorDo, string> = { walk: "walk", run: "sprint", jump: "sprint", fall: "die", point: "interact-right", cheer: "emote-yes", no: "emote-no", sit: "sit", "pick-up": "pick-up", idle: "idle", look: "idle" };
+const ACT_SPEED: Partial<Record<ActorDo, number>> = { walk: 1.7, run: 4.6, jump: 3.2 };
+const JUMP = 0.9; // seconds in the air
+
+// where they start and which way they head, per set (set-local)
+function actorPath(set: SetName) {
+  if (set === "highway") return { p: new THREE.Vector3(-12, 0, -5.4), dir: X };
+  if (set === "suburb") return { p: new THREE.Vector3(-10, 0, -1.75), dir: X };
+  if (set === "track") return { p: new THREE.Vector3(-6, 0, 2), dir: X };
+  const door = dtPos(STORE.i, STORE.j).add(new THREE.Vector3(0, 0, T * 0.5));
+  return { p: new THREE.Vector3(door.x - 9, 0, door.z + 0.5), dir: X }; // downtown / store sidewalk
+}
+
+type ActorState = { pos: THREE.Vector3; dir: THREE.Vector3; act: ActorDo; since: number; hop: number };
+function actorAt(s: Timed, local: number, fps: number): ActorState | null {
+  if (!s.actor?.length) return null;
+  const beats = s.actor.map((b, i) => ({ do: b.do, at: i === 0 && b.at === undefined ? 0 : Math.max(0, Math.round(((b.at ?? s.start) - s.start) * fps)) })).sort((a, b) => a.at - b.at);
+  const { p, dir } = actorPath(setOf(s));
+  let dist = 0, act: ActorDo = beats[0].do, since = 0;
+  for (let i = 0; i < beats.length; i++) {
+    const a = beats[i].at, b = beats[i + 1]?.at ?? Infinity;
+    if (local < a) break;
+    const run = Math.min(local, b) - a;
+    let speed = ACT_SPEED[beats[i].do] ?? 0;
+    if (beats[i].do === "jump" && run > JUMP * fps) speed = 0; // lands and stops
+    dist += (Math.min(run, beats[i].do === "jump" ? JUMP * fps : run) * speed) / fps;
+    act = beats[i].do; since = a;
+  }
+  const t = (local - since) / fps;
+  const hop = act === "jump" && t < JUMP ? Math.sin((t / JUMP) * Math.PI) * 2.2 : 0;
+  return { pos: p.clone().addScaledVector(dir, dist), dir, act, since, hop };
+}
+
+function Actor({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
+  const { fps } = useVideoConfig();
+  const a = actorAt(s, local, fps);
+  if (!a) return null;
+  const t = (local - a.since) / fps;
+  const yaw = Math.atan2(a.dir.x, a.dir.z);
+  const head = a.act === "look" ? { yaw: Math.sin(t * 2.2) * 0.7 } : undefined;
+  // after a jump they land in a crouch, then stand
+  const landed = a.act === "jump" && t >= JUMP;
+  return (
+    <>
+      <Person lib={lib} name={ACTOR} clip={landed ? "idle" : ACT_CLIP[a.act]} time={t} position={[a.pos.x, 0.05 + a.hop, a.pos.z]} rotation={[0, yaw, 0]} head={head} lean={landed && t < JUMP + 0.25 ? 0.4 : 0} />
+      {a.act === "jump" && t >= JUMP && t < JUMP + 0.6 && <Dust at={a.pos} age={t - JUMP} />}
+      {a.act === "fall" && t >= 0.5 && t < 1.1 && <Dust at={a.pos} age={t - 0.5} />}
+    </>
+  );
+}
+
+// a puff ring on the ground for landings and falls
+function Dust({ at, age }: { at: THREE.Vector3; age: number }) {
+  const r = 0.3 + age * 3;
+  return (
+    <mesh position={[at.x, 0.06, at.z]} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[r * 0.7, r, 32]} />
+      <meshBasicMaterial color="#E9E2D2" transparent opacity={Math.max(0, 0.7 - age * 1.2)} depthWrite={false} />
+    </mesh>
+  );
+}
+
+// impacts the camera should feel: jump landings and falls (scene-local frames)
+function impactsIn(s: Timed, fps: number) {
+  return (s.actor ?? []).flatMap((b) => {
+    const at = Math.max(0, Math.round(((b.at ?? s.start) - s.start) * fps));
+    return b.do === "jump" ? [at + Math.round(JUMP * fps)] : b.do === "fall" ? [at + Math.round(0.5 * fps)] : [];
+  });
+}
+
+/* ── callouts: a red measuring bracket and label attached to something in the world ── */
+
+const RED = "#E62E2E";
+const labelCache = new Map<string, THREE.Texture>();
+function labelTex(text: string) {
+  const hit = labelCache.get(text);
+  if (hit) return hit;
+  const c = document.createElement("canvas");
+  c.width = 1024; c.height = 256;
+  const g = c.getContext("2d")!;
+  g.font = `800 150px ${SANS}, Inter, Arial, sans-serif`;
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.lineJoin = "round"; g.lineWidth = 22; g.strokeStyle = "#FFFFFF";
+  g.strokeText(text, 512, 132);
+  g.fillStyle = RED; g.fillText(text, 512, 132);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  labelCache.set(text, t);
+  return t;
+}
+
+function Segment({ a, b, r = 0.045 }: { a: THREE.Vector3; b: THREE.Vector3; r?: number }) {
+  const mid = a.clone().add(b).multiplyScalar(0.5), len = a.distanceTo(b);
+  if (len < 1e-3) return null;
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize());
+  return <mesh position={mid} quaternion={q} renderOrder={10}><cylinderGeometry args={[r, r, len, 6]} /><meshBasicMaterial color={RED} toneMapped={false} depthTest={false} transparent /></mesh>;
+}
+
+const lotModelHeight = (lib: Lib, name: string, scale: number) => ((lib[name]?.userData.box as THREE.Box3 | undefined)?.getSize(new THREE.Vector3()).y ?? 1.3) * scale;
+
+// bracket ends (a→b), the tick direction, and where the label floats, all set-local
+function calloutGeom(lib: Lib, s: Timed, local: number, fps: number) {
+  const c = s.callout!;
+  const up = new THREE.Vector3(0, 1, 0);
+  if (c.target === "actor") {
+    const a = actorAt(s, local, fps);
+    if (!a) return null;
+    const side = new THREE.Vector3(a.dir.z, 0, -a.dir.x);
+    const base = a.pos.clone().addScaledVector(side, -0.75);
+    return { a: base.clone().setY(0.05 + a.hop), b: base.clone().setY(PERSON_H + a.hop), tick: side, label: base.clone().addScaledVector(side, -1.0).setY(PERSON_H * 0.6 + a.hop), size: 0.45 };
+  }
+  if (c.target === "car" || c.target === "gap") {
+    const sim = simFor(s, fps);
+    const ls = sim.lanes.find((l) => l.lane.id === sim.heroLane);
+    const cars = ls?.frames[Math.min(local, (ls?.frames.length ?? 1) - 1)];
+    const me = cars?.find((x) => x.id === sim.hero);
+    if (!ls || !cars || !me) return null;
+    const p = laneAt(ls.lane, me.u), d = dirAt(ls.lane, me.u);
+    if (c.target === "car") {
+      const a = p.clone().addScaledVector(d, -CAR_LEN / 2).setY(1.35), b = p.clone().addScaledVector(d, CAR_LEN / 2).setY(1.35);
+      return { a, b, tick: up, label: p.clone().setY(1.95), size: 0.5 };
+    }
+    const sorted = [...cars].sort((x, y) => x.u - y.u);
+    const lead = sorted[(sorted.indexOf(me) + 1) % sorted.length];
+    const q = laneAt(ls.lane, lead.u);
+    const a = p.clone().addScaledVector(d, CAR_LEN / 2).setY(0.9), b = q.clone().addScaledVector(d, -CAR_LEN / 2).setY(0.9);
+    return { a, b, tick: up, label: a.clone().add(b).multiplyScalar(0.5).setY(1.6), size: 0.5 };
+  }
+  if (c.target === "tower") {
+    const lot = dtPos(4, 4);
+    const h = lotModelHeight(lib, "building-skyscraper-a", T * 0.68);
+    const base = lot.clone().add(new THREE.Vector3(T * 0.62, 0, T * 0.62));
+    return { a: base.clone(), b: base.clone().setY(h), tick: new THREE.Vector3(1, 0, 0), label: base.clone().setY(h + 1.3), size: 1.3 };
+  }
+  if (c.target === "house") {
+    const x = (8 - SUB.n / 2 + 0.5) * T, z = -T * 1.9;
+    const h = lotModelHeight(lib, HOUSES[Math.floor(hash(8 * 3 - 1) * HOUSES.length)], T * 1.1);
+    const base = new THREE.Vector3(x + 3.2, 0, z + 2.6);
+    return { a: base.clone(), b: base.clone().setY(h), tick: new THREE.Vector3(1, 0, 0), label: base.clone().setY(h + 0.9), size: 0.8 };
+  }
+  // lane: straight across one highway strip
+  return { a: new THREE.Vector3(2, 0.12, -T / 2), b: new THREE.Vector3(2, 0.12, T / 2), tick: up, label: new THREE.Vector3(2, 1.4, 0), size: 0.75 };
+}
+
+function Callout({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
+  const { fps } = useVideoConfig();
+  if (!s.callout) return null;
+  const at = atFrame(s, s.callout.at, fps, 0.3);
+  if (local < at) return null;
+  const g = calloutGeom(lib, s, local, fps);
+  if (!g) return null;
+  const p = Easing.out(Easing.cubic)(Math.min(1, (local - at) / 10)); // draws itself on
+  const end = g.a.clone().lerp(g.b, p);
+  const tick = g.tick.clone().multiplyScalar(0.28);
+  const lp = Math.min(1, Math.max(0, (local - at - 6) / 6));
+  // from the drone a callout would vanish, so it grows with distance to stay readable
+  const zoom = Math.max(1, LENS.pos.distanceTo(g.label) / 9);
+  const r = 0.045 * zoom, size = g.size * zoom;
+  return (
+    <>
+      <Segment a={g.a} b={end} r={r} />
+      <Segment a={g.a.clone().sub(tick)} b={g.a.clone().add(tick)} r={r} />
+      {p > 0.98 && <Segment a={g.b.clone().sub(tick)} b={g.b.clone().add(tick)} r={r} />}
+      <sprite position={g.label.clone().setY(g.label.y + (zoom - 1) * 0.6)} scale={[size * 4 * (0.6 + 0.4 * lp), size * (0.6 + 0.4 * lp), 1]} renderOrder={11}>
+        <spriteMaterial map={labelTex(s.callout.label)} transparent opacity={lp} depthTest={false} toneMapped={false} />
+      </sprite>
+    </>
+  );
+}
+
 /* ── the reaction close-up: one person, front and centre, the set behind them ── */
 
 const REACT_CLIP = { no: "emote-no", yes: "emote-yes", idle: "idle", "pick-up": "pick-up" } as const;
@@ -648,20 +849,40 @@ function reactionSpot(set: SetName) {
 
 function Reactor({ lib, s, local }: { lib: Lib; s: Timed; local: number }) {
   const { fps } = useVideoConfig();
-  if (s.shot !== "reaction") return null;
+  if (s.shot !== "reaction" || s.actor?.length) return null;
   const { p, toward } = reactionSpot(setOf(s));
   const clip = REACT_CLIP[s.reaction?.do ?? "no"] ?? "emote-no";
   // faces the camera, which stands on the far side from the action
-  return <Person lib={lib} name="character-a" clip={clip} time={local / fps} position={[p.x, 0.05, p.z]} rotation={[0, toward > 0 ? Math.PI : 0, 0]} />;
+  return <Person lib={lib} name="character-a" clip={clip} time={(local - (s.cutFrom ?? 0)) / fps} position={[p.x, 0.05, p.z]} rotation={[0, toward > 0 ? Math.PI : 0, 0]} />;
 }
 
 /* ── camera shots, per set ── */
 
 function shotAt(s: Timed, local: number, fps: number) {
-  const k = Math.min(1, local / Math.max(1, s.frames));
+  const c0 = s.cutFrom ?? 0;
+  const k = Math.min(1, (local - c0) / Math.max(1, s.frames - c0));
   const set = setOf(s);
   const o = ORIGIN[set];
   const at = (x: number, y: number, z: number) => new THREE.Vector3(o.x + x, o.y + y, o.z + z);
+  const actShot = s.shot === "reaction" && s.actor?.length ? "face" : s.shot; // with an actor, the reaction is theirs
+  const act = actShot === "follow" || actShot === "face" || actShot === "low" || actShot === "overhead" ? actorAt(s, local, fps) : null;
+  if (act) {
+    const a = act.pos.clone().add(o), d = act.dir;
+    let side = new THREE.Vector3(d.z, 0, -d.x);
+    const y = act.hop;
+    // stand the camera on whichever side of them is open ground, coming in closer on narrow streets
+    let reach = actShot === "follow" ? 3.4 : actShot === "low" ? 1.3 : 0.6;
+    const clear = (sd: THREE.Vector3, r: number) => !solids(set).some((b) => inside(a.clone().addScaledVector(d, 3).addScaledVector(sd, r).setY(1.5), b));
+    // every actor path has its street on the -side (sidewalks, verges), so try the street side first
+    search: for (const r of [reach, reach * 0.7, reach * 0.45]) for (const sd of [side.clone().negate(), side]) if (clear(sd, r)) { side = sd; reach = r; break search; }
+    switch (actShot) {
+      case "face": return { pos: a.clone().addScaledVector(d, 2.3).addScaledVector(side, reach).setY(1.6 + y), look: a.clone().setY(1.42 + y) };
+      case "low": return { pos: a.clone().addScaledVector(d, 2.9).addScaledVector(side, reach).setY(0.35), look: a.clone().setY(1.5 + y) };
+      case "overhead": return { pos: a.clone().addScaledVector(d, -0.5).setY(13 + y * 0.3), look: a.clone().setY(0.5) };
+      // follow: tracking from ahead along the sidewalk, a little off to the street side, framed on them
+      default: return { pos: a.clone().addScaledVector(d, 4.4).addScaledVector(side, Math.min(reach, 2.2)).setY(2.0 + y * 0.5), look: a.clone().addScaledVector(d, 0.3).setY(1.0 + y) };
+    }
+  }
   if (s.shot === "driver") {
     // outside the windshield on the driver's side, looking back in at them; the jam behind
     const sim = simFor(s, fps);
@@ -792,19 +1013,31 @@ function guard(pos: THREE.Vector3, look: THREE.Vector3, set: SetName, low: boole
   return p;
 }
 
-const LOW = new Set(["reaction", "street", "chase", "scientist"]); // the driver cam is meant to look through glass
+const LOW = new Set(["reaction", "street", "chase", "scientist", "follow", "face", "low"]); // the driver cam is meant to look through glass
+// on a drone/orbit shot with a callout, re-aim at the thing being measured (keeping the camera's offset)
+function aimAtCallout(s: Timed, local: number, fps: number, lib: Lib | null, shot: { pos: THREE.Vector3; look: THREE.Vector3 }) {
+  if (!s.callout || !lib || !(s.shot === "aerial" || s.shot === "orbit")) return shot;
+  const g = calloutGeom(lib, s, local, fps);
+  if (!g) return shot;
+  const target = g.a.clone().add(g.b).multiplyScalar(0.5).add(ORIGIN[setOf(s)]);
+  const shift = target.clone().sub(shot.look).setY(0);
+  return { pos: shot.pos.clone().add(shift), look: target };
+}
+let LIB: Lib | null = null; // the loaded kit, for camera maths that needs model sizes
+
 const WHIP = 10, SLAM = 20;
 function cameraAt(scenes: Timed[], f: number, fps: number) {
   let i = scenes.findIndex((_, k) => f < (scenes[k + 1]?.from ?? Infinity));
   if (i < 0) i = scenes.length - 1;
   const s = scenes[i];
   const local = f - s.from;
-  let { pos, look } = shotAt(s, local, fps);
-  pos = guard(pos, look, setOf(s), LOW.has(s.shot ?? ""));
+  const v = viewAt(s, local, fps);
+  let { pos, look } = aimAtCallout(v, local, fps, LIB, shotAt(v, local, fps));
+  pos = guard(pos, look, setOf(v), LOW.has(v.shot ?? ""));
   let roll = 0, whip = 0;
   if (i > 0 && local < WHIP) {
     // whip pan: hangs, snaps through, settles; blur follows the speed
-    const ps = scenes[i - 1];
+    const ps = viewAt(scenes[i - 1], scenes[i - 1].frames, fps);
     const prev = shotAt(ps, ps.frames, fps);
     prev.pos = guard(prev.pos, prev.look, setOf(ps), LOW.has(ps.shot ?? ""));
     const ease = Easing.inOut(Easing.exp);
@@ -821,6 +1054,11 @@ function cameraAt(scenes: Timed[], f: number, fps: number) {
   }
   pos.x += Math.sin(f / 41) * 0.12; // handheld drift
   pos.y += Math.sin(f / 33 + 1) * 0.08;
+  // landings and falls hit the camera too
+  for (const at of impactsIn(s, fps)) {
+    const age = local - at;
+    if (age >= 0 && age < 12) { const k = Math.pow(1 - age / 12, 2); pos.x += Math.sin(age * 2.9) * 0.18 * k; pos.y += Math.cos(age * 3.7) * 0.14 * k; }
+  }
   return { i, local, pos, look, roll, whip };
 }
 
@@ -839,10 +1077,12 @@ function World({ scenes, lib }: { scenes: Timed[]; lib: Lib }) {
   const { fps } = useVideoConfig();
   const cam = cameraAt(scenes, f, fps);
   const s = scenes[cam.i];
+  const view = viewAt(s, cam.local, fps);
   // the set we're in, plus the one we're whipping in from
   const prev = cam.i > 0 && cam.local < WHIP ? scenes[cam.i - 1] : null;
   const sun = useMemo(() => new THREE.Object3D(), []);
   sun.position.copy(cam.look).setY(0);
+  LENS.pos.copy(cam.pos).sub(ORIGIN[setOf(s)]);
   const SetNow = SETS[setOf(s)];
   const SetPrev = prev ? SETS[setOf(prev)] : null;
   const o = ORIGIN[setOf(s)];
@@ -861,8 +1101,10 @@ function World({ scenes, lib }: { scenes: Timed[]; lib: Lib }) {
         <meshStandardMaterial color="#86C06A" roughness={1} />
       </mesh>
       <group position={o}>
-        <SetNow lib={lib} s={s} local={cam.local} />
-        <Reactor lib={lib} s={s} local={cam.local} />
+        <SetNow lib={lib} s={view} local={cam.local} />
+        <Reactor lib={lib} s={view} local={cam.local} />
+        <Actor lib={lib} s={view} local={cam.local} />
+        <Callout lib={lib} s={view} local={cam.local} />
       </group>
       {SetPrev && prev && po && (setOf(prev) !== setOf(s) || ORIGIN[setOf(prev)] !== o) && (
         <group position={po}><SetPrev lib={lib} s={prev} local={prev.frames} /></group>
@@ -892,6 +1134,21 @@ function CityCaption({ scene }: { scene: Timed }) {
   );
 }
 
+// speed lines from the frame edges while the actor runs or flies
+function SpeedLines({ s }: { s: Timed }) {
+  const f = useCurrentFrame();
+  const a = actorAt(s, f, 30);
+  const t = a ? (f - a.since) / 30 : 0;
+  if (!a || !(a.act === "run" || (a.act === "jump" && t < JUMP))) return null;
+  const lines = Array.from({ length: 28 }, (_, i) => {
+    const ang = hash(i * 7.3) * Math.PI * 2;
+    const r0 = 560 + hash(i + f * 0.37) * 300, len = 120 + hash(i * 3 + f) * 220;
+    const cx = 540, cy = 960;
+    return <line key={i} x1={cx + Math.cos(ang) * r0} y1={cy + Math.sin(ang) * r0 * 1.6} x2={cx + Math.cos(ang) * (r0 + len)} y2={cy + Math.sin(ang) * (r0 + len) * 1.6} stroke="white" strokeWidth={3 + hash(i) * 5} strokeLinecap="round" opacity={0.35 + hash(i + f) * 0.3} />;
+  });
+  return <svg width={1080} height={1920} style={{ position: "absolute", inset: 0 }}>{lines}</svg>;
+}
+
 // a comic speech bubble for the scientist on the megaphone
 function Bubble({ text }: { text: string }) {
   const f = useCurrentFrame();
@@ -906,14 +1163,25 @@ function Bubble({ text }: { text: string }) {
   );
 }
 
-function Overlay({ s }: { s: Timed }) {
+function Overlay({ s: scene }: { s: Timed }) {
+  const f = useCurrentFrame();
+  const s = viewAt(scene, f, 30);
   if (s.shot === "scientist" && s.scientists?.bubble) return <Bubble text={s.scientists.bubble} />;
   const outline = { WebkitTextStroke: "10px #161616", paintOrder: "stroke fill" } as React.CSSProperties;
   if (s.value !== undefined) return <div style={outline}><Counter scene={s} y={760} size={210} /></div>;
   // on low shots the action is mid-frame, so the headline sits up under the caption instead
+  // street-level shots: up under the caption; shots built around the actor: the lower third, clear of them
   const low = s.shot === "chase" || s.shot === "street";
-  if (s.big && s.shot !== "reaction" && s.shot !== "driver" && (s.kind === "line" || s.kind === "end" || s.kind === "hook")) return <div style={outline}><Statement text={s.big} y={low ? 560 : 1260} size={low ? 96 : 112} /></div>;
+  const onActor = s.shot === "follow" || s.shot === "low" || s.shot === "face";
+  if (s.big && s.shot !== "reaction" && s.shot !== "driver" && (s.kind === "line" || s.kind === "end" || s.kind === "hook"))
+    return <div style={outline}><Statement text={s.big} y={onActor ? 1480 : low ? 560 : 1260} size={low || onActor ? 96 : 112} /></div>;
   return null;
+}
+
+// stretches of a scene (scene-local frames) showing an angry driver: the scene itself and/or its cuts
+function driverWindows(s: Timed, fps: number): [number, number][] {
+  const marks = [{ at: 0, shot: s.shot, mood: s.mood }, ...(s.cuts ?? []).filter((c) => c.at !== undefined).map((c) => ({ at: Math.round((c.at! - s.start) * fps), shot: c.shot, mood: c.mood ?? s.mood }))].sort((a, b) => a.at - b.at);
+  return marks.map((m, i) => [m, marks[i + 1]?.at ?? s.frames] as const).filter(([m]) => m.shot === "driver" && (m.mood ?? "angry") === "angry").map(([m, end]) => [m.at, end]);
 }
 
 export function City({ audio, handle, total, scenes }: CityProps) {
@@ -926,6 +1194,7 @@ export function City({ audio, handle, total, scenes }: CityProps) {
   });
   const blur = cameraAt(timed, frame, fps).whip * 34;
   const { lib, err } = useAssets();
+  LIB = lib;
   return (
     <AbsoluteFill style={{ background: SKY }}>
       <Audio src={staticFile(audio)} />
@@ -940,12 +1209,13 @@ export function City({ audio, handle, total, scenes }: CityProps) {
         )}
         {timed.map((s, i) => (
           <Sequence key={i} from={s.from} durationInFrames={s.frames}>
+            <SpeedLines s={s} />
             <Overlay s={s} />
             <CityCaption scene={s} />
             {i > 0 && <Sequence from={-2} durationInFrames={14} layout="none"><Audio src={staticFile("sfx/whoosh.wav")} volume={0.3} /></Sequence>}
-            {s.shot === "driver" && (s.mood ?? "angry") === "angry" && HONKS.map((h, k) => (
-              <Sequence key={`h${k}`} from={Math.round(h * fps)} durationInFrames={14} layout="none"><Audio src={staticFile("sfx/honk.wav")} volume={0.35} /></Sequence>
-            ))}
+            {driverWindows(s, fps).flatMap(([a, b], w) => HONKS.map((h) => a + Math.round(h * fps)).filter((x) => x < b).map((x, k) => (
+              <Sequence key={`h${w}-${k}`} from={x} durationInFrames={14} layout="none"><Audio src={staticFile("sfx/honk.wav")} volume={0.35} /></Sequence>
+            )))}
             {sfxFor(s, fps).map((x, k) => (
               <Sequence key={k} from={Math.max(0, x.at)} durationInFrames={16} layout="none"><Audio src={staticFile(`sfx/${x.src}.wav`)} volume={x.vol} /></Sequence>
             ))}

@@ -24,13 +24,15 @@ const dataSample: DataProps = { audio: "work/test.mp3", handle: "@yourhandle", t
 const demoSample: DemoProps = { audio: "work/test.mp3", handle: "@yourhandle", total: 9, scenes: [] };
 
 // hand-made props for previewing the city with `npx remotion still` before any script exists
-const citySample: CityProps = { audio: "sfx/pop.wav", handle: "@bryzdaily", total: 18, scenes: [
-  { kind: "hook", say: "Why do traffic jams appear out of nowhere?", start: 0, end: 3, words: [], set: "highway", shot: "aerial", traffic: { level: 0.3 }, big: "Jams from nowhere" },
-  { kind: "line", say: "One driver taps the brakes.", start: 3, end: 6, words: [], set: "highway", shot: "driver", mood: "angry", traffic: { level: 0.85 } },
-  { kind: "line", say: "So the city adds a lane.", start: 6, end: 9, words: [], set: "highway", shot: "orbit", traffic: { level: 0.9 }, build: { what: "lane", at: 6.5 } },
-  { kind: "line", say: "Scientists ran the test.", start: 9, end: 12, words: [], set: "track", shot: "aerial", scientists: { do: "watch" } },
-  { kind: "line", say: "Hold a steady speed.", start: 12, end: 15, words: [], set: "track", shot: "scientist", scientists: { do: "instruct", bubble: "Hold a steady speed!" } },
-  { kind: "end", say: "And shoppers keep coming.", start: 15, end: 18, words: [], set: "store", shot: "street", people: { count: 6, do: "enter", at: 15.2 }, traffic: { level: 0.4 }, big: "Would you shop here?" },
+const citySample: CityProps = { audio: "sfx/pop.wav", handle: "@bryzdaily", total: 16, scenes: [
+  { kind: "hook", say: "Is walking faster than driving downtown?", start: 0, end: 3, words: [], set: "store", shot: "aerial", traffic: { level: 0.4 },
+    actor: [{ do: "walk" }], cuts: [{ at: 1.0, shot: "follow" }], callout: { label: "3 mph", target: "actor", at: 1.4 }, big: "Walk or drive?" },
+  { kind: "line", say: "The driver is stuck.", start: 3, end: 6, words: [], set: "highway", shot: "driver", mood: "angry", traffic: { level: 0.85 },
+    cuts: [{ at: 4.6, shot: "aerial" }], callout: { label: "6 ft gap", target: "gap", at: 4.8 } },
+  { kind: "line", say: "He runs and jumps.", start: 6, end: 9.5, words: [], set: "suburb", shot: "low", traffic: { level: 0.3 },
+    actor: [{ do: "run" }, { do: "jump", at: 7.6 }], cuts: [{ at: 7.0, shot: "follow" }] },
+  { kind: "line", say: "The tower is huge.", start: 9.5, end: 12.5, words: [], set: "downtown", shot: "orbit", traffic: { level: 0.5 }, callout: { label: "300 ft", target: "tower", at: 10 } },
+  { kind: "end", say: "Scientists agree.", start: 12.5, end: 16, words: [], set: "track", shot: "scientist", scientists: { do: "instruct", bubble: "Keep it steady!" }, cuts: [{ at: 14, shot: "overhead" }] },
 ] };
 
 export const Root = () => (

@@ -122,6 +122,9 @@ Scene fields:
 - "kind": "hook" (first) | "line" | "count" | "end" (last: asks a question for the comments, then invites a follow).
 - "set": "highway" (wide multi-lane highway with trees) | "downtown" (street grid, shops, towers) | "suburb" (street of houses with yards) | "store" (one shop front on a downtown street) | "track" (a circular test track in a field with scientists in the middle: use it for experiments and studies).
 - "shot": "aerial" (drone, high) | "street" (low, at street level) | "chase" (behind a car in traffic: highway or downtown) | "orbit" (slow circle around the set) | "reaction" (close-up of one person reacting, the set behind them) | "driver" (close-up of a driver in their car, the traffic behind them; highway or track only; give "mood") | "scientist" (track only: close-up of the lead scientist on a megaphone; give "scientists").
+- "actor": the main character (one recurring guy) acting the story out: [{"do": "walk"|"run"|"jump"|"fall"|"point"|"cheer"|"no"|"sit"|"pick-up"|"idle"|"look", "on": exact word}] (first entry needs no "on"). Shots built on him: "follow" (tracking alongside), "face" (close-up of his face), "low" (low hero angle), "overhead" (from above). If a scene has an actor, its "reaction" shot is him.
+- "cuts": camera switches INSIDE the scene, each on a word: [{"on": exact word, "shot": any shot, "mood"?: for driver cuts}]. Use 1-2 per scene so the angle changes every 2-3 seconds, like a real edit (e.g. wide "aerial" → "driver" close-up on "angry" → "follow" on "walks").
+- "callout": a red measuring bracket + label stuck to something in the world, on a word: {"label": max 3 words with the number + unit ("6 ft gap", "300 ft", "3 mph"), "target": "actor" | "car" (hero car length) | "gap" (space to the car ahead) | "tower" (downtown skyscraper height) | "house" (suburb house height) | "lane" (highway lane width), "on": exact word}. Use for any real measurement that's spoken.
 - "mood" (driver shots): "angry" (honks, shakes head, steam) | "bored" (slumped) | "shocked" | "relieved".
 - "scientists" (track set): {"do": "instruct" | "watch" | "cheer", "bubble": max 5 words they say into the megaphone, only on "scientist" shots}.
 - "traffic": {"level": 0-1 (0 empty, 0.5 busy, 1 gridlock), "to": optional new level, "on": the exact word in "say" where it changes}.
@@ -132,6 +135,7 @@ Scene fields:
 - "big": on-screen words, max 5, for hook/line/end (leave it out on reaction shots).
 - count scenes: "value" (number only), optional "prefix" ("$"), "suffix" ("%", " min"), "label" (max 6 words), "on" (word where the number is spoken).
 - "em": 1-2 words copied from "say" to highlight.
+EDIT LIKE A PRO: every scene has 1-2 "cuts" so the camera changes every 2-3 seconds; the actor acts out what's said whenever a person is the subject; every spoken measurement gets a "callout".
 DETAIL: every scene needs at least one small story action that supports its sentence: a driver getting angry, a brake, people walking in, scientists instructing or cheering, a lane being laid. Feelings go on "driver" or "reaction" shots; studies and experiments go on the "track" set.
 DIRECTING: the shot acts out the sentence, timed to the word ("more people pile on" → traffic rises ON "pile"; "they add a lane" → build lane ON "lane"; "shoppers walk in" → people enter ON "walk"). Change the set or the shot every scene. Use at least 3 different shots and 2 different sets. The reaction person is the viewer's stand-in (frustrated = "no", realisation = "yes"): use them 1-2 times. Open on a strong establishing shot (aerial or chase).
 Rules: 5-7 scenes. EVERY number must be real and from your sources; if you can't source a number, leave it out.`;
@@ -225,7 +229,12 @@ if (style === "city") {
   for (const s of scenes) {
     if (Array.isArray(s.big)) s.big = s.big.join(" "); // the writer sometimes splits the headline into lines
     if (s.shot === "driver" && s.set !== "highway" && s.set !== "track") s.set = "highway"; // the in-car shot needs open road around it
-    for (const k of ["traffic", "build", "people", "brake"]) if (s[k]?.on) s[k].at = when(s, s[k].on);
+    for (const k of ["traffic", "build", "people", "brake", "callout"]) if (s[k]?.on) s[k].at = when(s, s[k].on);
+    for (const c of s.cuts ?? []) {
+      c.at = when(s, c.on);
+      if (c.shot === "driver" && s.set !== "highway" && s.set !== "track") c.shot = "chase"; // in-car shots need open road
+    }
+    for (const b of s.actor ?? []) if (b.on) b.at = when(s, b.on);
     if (s.value !== undefined) {
       const w = [s.on, s.value].filter(Boolean).map((x) => when(s, x)).find((x) => x !== undefined);
       s.hit = w !== undefined ? s.words.find((x) => x.s === w).e : s.start + (s.end - s.start) * 0.6;
