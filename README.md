@@ -53,7 +53,7 @@ Requires Node 20+, Python 3, ffmpeg, and the [Claude Code CLI](https://docs.clau
 
 ## Stack
 
-Node · Remotion 4 · Three.js / React Three Fiber · edge-tts · ffmpeg · Claude Code CLI · YouTube Data API v3. Runs locally: about 4 minutes per 3D reel on an 8GB M-series Mac, $0 per reel beyond the Claude plan.
+Node · Remotion 4 · Three.js / React Three Fiber · edge-tts · ffmpeg · Claude Code CLI · YouTube Data API v3. Runs locally: about 4 minutes per 3D reel on a 2020 Intel MacBook Air (8GB), $0 per reel beyond the Claude plan.
 
 ## Credits
 
