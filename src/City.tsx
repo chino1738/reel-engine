@@ -486,7 +486,7 @@ const REACT_CLIP = { no: "emote-no", yes: "emote-yes", idle: "idle", "pick-up": 
 // where the person stands, and which way the action is (the camera looks past them at it)
 function reactionSpot(set: SetName) {
   if (set === "highway") return { p: new THREE.Vector3(2, 0, -T * 1.4), toward: 1 };
-  if (set === "suburb") return { p: new THREE.Vector3(T * 2, 0, -T * 0.95), toward: 1 };
+  if (set === "suburb") return { p: new THREE.Vector3(2.0, 0, -2.3), toward: 1 }; // in the gap between two houses, street behind
   return { p: dtPos(STORE.i, STORE.j).add(new THREE.Vector3(T * 0.7, 0, T * 0.9)), toward: -1 }; // store sidewalk, shop behind
 }
 
@@ -550,6 +550,62 @@ function shotAt(s: Timed, local: number, fps: number) {
   }
 }
 
+/* ── camera guard: the lens never sits inside a building, and low shots always see their subject ── */
+
+type Box = { min: THREE.Vector3; max: THREE.Vector3 };
+const solidCache = new Map<SetName, Box[]>();
+function solids(set: SetName): Box[] {
+  const hit = solidCache.get(set);
+  if (hit) return hit;
+  const o = ORIGIN[set];
+  const box = (x: number, z: number, hx: number, hz: number, h: number): Box => ({ min: new THREE.Vector3(o.x + x - hx, -1, o.z + z - hz), max: new THREE.Vector3(o.x + x + hx, h, o.z + z + hz) });
+  const out: Box[] = [];
+  if (set === "downtown" || set === "store") {
+    for (let i = 0; i < DT.n; i++) for (let j = 0; j < DT.n; j++) {
+      if (isRoad(i) || isRoad(j)) continue;
+      const p = dtPos(i, j);
+      out.push(box(p.x, p.z, T * 0.49, T * 0.49, 12));
+    }
+  } else if (set === "suburb") {
+    for (let k = 0; k < SUB.n; k += 2) {
+      const x = (k - SUB.n / 2 + 0.5) * T;
+      for (const side of [-1, 1]) {
+        out.push(box(x, side * T * 1.9, 2.9, 2.4, 5));
+        for (const row of [2, 3]) out.push(box(x + T * 0.5, side * T * (1.9 + row * 1.7), 2.9, 2.4, 5));
+        out.push(box(x - T * 0.8, side * T * 2.8, 0.8, 0.8, 6)); // yard tree
+      }
+    }
+  } else {
+    for (let k = 0; k < HWY.len; k += 2) {
+      const x = (k - HWY.len / 2) * T;
+      out.push(box(x + hash(k) * 3, -T * 1.2 - hash(k + 9) * 7, 0.8, 0.8, 6));
+      out.push(box(x + hash(k + 3) * 3, (HWY.strips - 0.5) * T + T * 0.8 + hash(k + 5) * 7, 0.8, 0.8, 6));
+    }
+  }
+  solidCache.set(set, out);
+  return out;
+}
+const inside = (p: THREE.Vector3, b: Box, pad = 0.4) =>
+  p.x > b.min.x - pad && p.x < b.max.x + pad && p.y < b.max.y + pad && p.z > b.min.z - pad && p.z < b.max.z + pad;
+const ray = new THREE.Ray();
+const tmpBox = new THREE.Box3();
+function blocks(from: THREE.Vector3, to: THREE.Vector3, b: Box) {
+  if (inside(to, b, 0)) return false; // the subject itself may sit against a wall (a shop front)
+  ray.set(from, to.clone().sub(from).normalize());
+  const hit = ray.intersectBox(tmpBox.set(b.min, b.max), new THREE.Vector3());
+  return !!hit && hit.distanceTo(from) < from.distanceTo(to);
+}
+// walk the camera toward its subject until it's out of every wall and (on low shots) has a clear view
+function guard(pos: THREE.Vector3, look: THREE.Vector3, set: SetName, low: boolean) {
+  const bs = solids(set);
+  const p = pos.clone();
+  for (let n = 0; n < 40; n++) {
+    if (!bs.some((b) => inside(p, b) || (low && blocks(p, look, b)))) return p;
+    p.lerp(look, 0.06);
+  }
+  return p;
+}
+
 const WHIP = 10, SLAM = 20;
 function cameraAt(scenes: Timed[], f: number, fps: number) {
   let i = scenes.findIndex((_, k) => f < (scenes[k + 1]?.from ?? Infinity));
@@ -557,10 +613,13 @@ function cameraAt(scenes: Timed[], f: number, fps: number) {
   const s = scenes[i];
   const local = f - s.from;
   let { pos, look } = shotAt(s, local, fps);
+  pos = guard(pos, look, setOf(s), s.shot === "reaction" || s.shot === "street" || s.shot === "chase");
   let roll = 0, whip = 0;
   if (i > 0 && local < WHIP) {
     // whip pan: hangs, snaps through, settles; blur follows the speed
-    const prev = shotAt(scenes[i - 1], scenes[i - 1].frames, fps);
+    const ps = scenes[i - 1];
+    const prev = shotAt(ps, ps.frames, fps);
+    prev.pos = guard(prev.pos, prev.look, setOf(ps), ps.shot === "reaction" || ps.shot === "street" || ps.shot === "chase");
     const ease = Easing.inOut(Easing.exp);
     const u = local / WHIP, t = ease(u);
     pos = prev.pos.clone().lerp(pos, t);
