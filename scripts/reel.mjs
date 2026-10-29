@@ -6,11 +6,12 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
 import { renderMedia, selectComposition } from "@remotion/renderer";
+import { uploadShort } from "./youtube.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const flag = (n, d) => (args.includes(n) ? args[args.indexOf(n) + 1] : d);
-const BOOL = new Set(["--reuse", "--revoice", "--auto", "--deliver"]);
+const BOOL = new Set(["--reuse", "--revoice", "--auto", "--deliver", "--focus"]);
 loadEnv(join(dirname(fileURLToPath(import.meta.url)), "..", ".env"));
 function loadEnv(path) {
   if (!existsSync(path)) return;
@@ -42,7 +43,8 @@ Return ONLY the topic as a short phrase, no quotes, no punctuation at the end.`]
   console.log(`▸ Lane "${lane.name}" → ${topic}`);
 }
 const lang = flag("--lang", "en");
-const style = flag("--style", "demo"); // demo | collage | footage
+const style = flag("--style", "demo"); // demo | data | 3d | collage | footage
+const dataLike = style === "data" || style === "3d";
 const handle = flag("--handle", lang === "es" ? "@curiosidades" : "@bryzdaily");
 // voices he picked 10/28: brian (default) and ava; both Multilingual, tuned for energy
 const VOICES = {
@@ -102,6 +104,18 @@ VERBS: appear (pops in), drop (falls in and lands), slide, fly (flies in on an a
 FX: droplets, sparkles, steam, smoke, dust, confetti, snow, fire, bubbles, salt, hearts, zap.
 OBJECT LIST:
 ${readFileSync(join(ROOT, "data/fluent-names.txt"), "utf8").split("\n").join(" | ")}`;
+const DATA_KINDS = `THIS IS A STAT-FLIP REEL: the numbers are the visuals. Story arc: a surprising or bad-sounding number → "sounds bad/weird, until you see why" → the number that flips it → the real reason → end on a question.
+Scene kinds:
+- hook: first scene. "big" = on-screen words (max 6). If the hook states a number, also give "value" (the number only, e.g. 3628 or 1.50), optional "prefix" ("$"), "suffix" ("%", "B", " times"), "on" (the word in "say" where the number is spoken).
+- count: one hero number that ticks up. "value", optional "prefix"/"suffix", "label" (what it is, max 6 words), "on" (word in "say" where the number is spoken), "pins": true if it counts events/things (shows markers popping), false for prices/percentages.
+- bars: compare 2-4 things on one measure. "items": [{"label": max 2 words, "value": number}] (years or dates: oldest to newest, left to right; otherwise main subject first; the biggest value is lit gold), "unit" (optional, e.g. "%" or "B"), "label" (what's measured, max 5 words).
+- scale: one thing vs another (or vs "everyone else combined"). "left": {"label","value"}, "right": {"label","value"}, "label" (max 5 words).
+- line: "big" = the key idea/reason, max 6 words.
+- end: last scene. "say" asks a question that makes people comment, then invites a follow. "big" = the question, max 6 words.
+Also every scene: "em": 1-2 words copied exactly from its "say" to highlight, and "show": the scene's subject as EXACTLY one name from the OBJECT LIST below (the literal thing being talked about, e.g. the product, place, or a reaction like "Thinking face" for the reason).
+Rules: 5-6 scenes, at least 2 of count/bars/scale, at most ONE line scene. EVERY number must be real and come from your sources; if you can't source a number, don't use it. "value" fields are plain numbers. Money: put the symbol in "prefix" (count) or "unit" (bars), e.g. "$".
+OBJECT LIST:
+${readFileSync(join(ROOT, "data/fluent-names.txt"), "utf8").split("\n").join(" | ")}`;
 const prompt = lang === "es"
   ? `Eres guionista de reels de curiosidades en español latino neutro. Tema: "${topic}".
 Devuelve SOLO un objeto JSON con: "title", "caption" (1-2 frases), "hashtags" (5, sin #), "sources" (2-3 fuentes reales y verificables), "confidence" ("alta"|"media"), "scenes" (lista).
@@ -111,7 +125,7 @@ Reglas: 5 a 6 escenas; todo el "say" junto suma 60-80 palabras (~30 s); cada "sa
   : `You write short-form "did you know / why does" explainer reels in plain, punchy American English. Topic: "${topic}".
 Return ONLY a JSON object with: "title", "caption" (1-2 sentences), "hashtags" (5, no #), "sources" (2-3 real, checkable sources: institution, study or encyclopedia), "confidence" ("high"|"medium"), "scenes" (array).
 Each scene: {"kind", "say", "broll", ...fields for its kind}. "broll" = 2-4 English words to search a stock video clip that literally shows what's being said (e.g. "ocean waves aerial", "airplane meal tray"). Concrete, filmable things only.
-${SCENE_TYPES_EN}
+${dataLike ? DATA_KINDS : SCENE_TYPES_EN}
 ${args.includes("--auto") ? `Lane: ${lane.name}. ${lane.rule}\n` : ""}Rules: 5-6 scenes; all "say" text together is 60-80 words (~30 s); each "say" is one short, natural sentence. Use at least 3 different scene kinds. Only well-established facts; never invent numbers. Sound like an excited friend who just learned this: punchy, contractions, an exclamation point or a "here's the crazy part" beat where it fits, but never fake hype words like "insane" or "mind-blowing". Explain the why simply. No filler, no "did you know".
 ${style === "collage" ? COLLAGE_FIELDS : style === "demo" ? DEMO_FIELDS : ""}`;
 // --reuse re-renders today's existing script and voice (for template tweaks)
@@ -166,6 +180,17 @@ if (style === "demo") {
   }
   console.log(`  ${scenes.map((s) => s.beats.map((b) => b.do).join("+")).join(" | ")}`);
 }
+if (dataLike) {
+  // the count lands on the word where the number is spoken
+  const norm = (w) => String(w).toLowerCase().replace(/[^a-z0-9.%$]/g, "").replace(/^\$/, "");
+  for (const s of scenes) {
+    s.show = s.show ? await fluentAsset(s.show) : undefined;
+    if (s.value === undefined) continue;
+    const targets = [s.on, s.value].filter(Boolean).map(norm);
+    const w = s.words.find((w) => targets.some((t) => t && (norm(w.w) === t || norm(w.w).replace(/[,]/g, "") === t.replace(/[,]/g, ""))));
+    s.hit = w ? w.e : s.start + (s.end - s.start) * 0.6;
+  }
+}
 if (style === "collage") {
   step("Pulling 3D art");
   for (const s of scenes) {
@@ -214,9 +239,16 @@ else {
 
 // 4. Render.
 step("Rendering the video");
+// --focus quits heavy apps first so the render gets the RAM (8GB Mac)
+if (args.includes("--focus")) {
+  for (const app of (process.env.FOCUS_QUIT ?? "Google Chrome,Notion,ChatGPT,CapCut,Antigravity").split(",")) {
+    try { execFileSync("osascript", ["-e", `if application "${app}" is running then tell application "${app}" to quit`]); } catch {}
+  }
+  console.log("  focus: closed heavy apps");
+}
 const serveUrl = await bundle({ entryPoint: join(ROOT, "src/index.ts"), publicDir: join(ROOT, "public") });
 const inputProps = { audio: audioRel, handle, lang, total: timing.total, scenes };
-const composition = await selectComposition({ serveUrl, id: { demo: "Demo", collage: "Collage" }[style] ?? "Reel", inputProps });
+const composition = await selectComposition({ serveUrl, id: { demo: "Demo", data: "Data", "3d": "Reel3D", collage: "Collage" }[style] ?? "Reel", inputProps });
 const outFile = join(ROOT, "out", `${id}.mp4`);
 let last = -1;
 await renderMedia({
@@ -226,7 +258,8 @@ await renderMedia({
   crf: 23, // about half the size of the default 18; the apps re-encode anyway, and texts send faster
   outputLocation: outFile,
   inputProps,
-  concurrency: 2,
+  concurrency: style === "3d" ? 1 : 2, // WebGL is memory hungry on 8GB
+  ...(style === "3d" ? { chromiumOptions: { gl: "angle" } } : {}),
   onProgress: ({ progress }) => {
     const pct = Math.floor(progress * 10) * 10;
     if (pct !== last) { last = pct; process.stdout.write(`  ${pct}%`); }
@@ -235,7 +268,7 @@ await renderMedia({
 
 // 5. Post kit: caption, hashtags, and sources to double-check before posting.
 const credits = [...new Set(scenes.map((s) => s.credit).filter(Boolean))];
-const kit = `${script.caption}\n\n${script.hashtags.map((h) => `#${h}`).join(" ")}\n\n--- check before posting (confidence: ${script.confidence}) ---\n${script.sources.map((s) => `• ${s}`).join("\n")}\n${credits.length ? `\nFootage: ${credits.join(", ")}\n` : ""}`;
+const kit = `${script.caption}\n\n${script.hashtags.map((h) => `#${h}`).join(" ")}\n\n--- check before posting (confidence: ${script.confidence}) ---\n${script.sources.map((s) => `• ${s}`).join("\n")}\n${credits.length ? `\nFootage: ${credits.join(", ")}\n` : ""}\nDisclosure line for the caption: Narration is AI-generated; graphics are illustrations.\n`;
 writeFileSync(join(ROOT, "out", `${id}.txt`), kit);
 console.log(`\n\n✓ ${outFile}\n✓ ${join(ROOT, "out", `${id}.txt`)}`);
 
@@ -249,11 +282,27 @@ if (args.includes("--deliver")) {
   mkdirSync(reels, { recursive: true });
   execFileSync("cp", [outFile, join(ROOT, "out", `${id}.txt`), reels]);
   console.log(`  → iCloud Drive/Reels/${id}.mp4`);
+  // Grain makes 3D renders ~48MB; a 5.5 Mbps copy (~20MB) texts much faster and the apps re-encode anyway.
+  const phoneFile = outFile.replace(/\.mp4$/, "-phone.mp4");
+  try {
+    execFileSync(process.env.FFMPEG ?? join(process.env.HOME, "projects/voice-claude-app/bin/ffmpeg"), ["-loglevel", "error", "-y", "-i", outFile,
+      "-c:v", "libx264", "-preset", "slow", "-b:v", "5500k", "-maxrate", "6500k", "-bufsize", "11000k", "-pix_fmt", "yuv420p",
+      "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", phoneFile]);
+  } catch { execFileSync("cp", [outFile, phoneFile]); }
   if (process.env.IMESSAGE_TO) {
     // Text the post kit, then the video. Uploads from the Mac are slow, so the text goes first.
     execFileSync("osascript", [join(ROOT, "scripts/imessage.applescript"), process.env.IMESSAGE_TO,
-      `🎬 New @bryzdaily reel (${lane.name}, ${voicePick.id.includes("Ava") ? "Ava" : "Brian"}): ${script.title}\nVideo is the next message (can take a few minutes to upload).\n\n${kit}`, outFile]);
+      `🎬 New @bryzdaily reel (${lane.name}, ${voicePick.id.includes("Ava") ? "Ava" : "Brian"}): ${script.title}\nVideo is the next message (can take a few minutes to upload).\n\n${kit}`, phoneFile]);
     console.log(`  → texted to ${process.env.IMESSAGE_TO}`);
+  }
+  if (process.env.YT_REFRESH_TOKEN) {
+    // A failed upload shouldn't fail the night: the reel is already on his phone.
+    try {
+      const yt = await uploadShort(outFile, { title: script.title, description: `${script.caption}\n\nSources:\n${script.sources.map((s) => `• ${s}`).join("\n")}\n\n${script.hashtags.map((h) => `#${h}`).join(" ")}`, tags: script.hashtags });
+      console.log(`  → YouTube ${yt.privacy}: ${yt.url}`);
+    } catch (e) {
+      console.log(`  ✗ YouTube upload failed: ${e.message}`);
+    }
   }
 }
 

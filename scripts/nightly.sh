@@ -7,7 +7,7 @@ TODAY=$(date +%Y-%m-%d)
 # one reel per night, even if launchd fires again after a wake
 MARK="logs/done-$TODAY"
 [ -f "$MARK" ] && { echo "$(date) already made tonight" >> logs/nightly.log; exit 0; }
-caffeinate -i npm run reel -- --auto --deliver >> logs/nightly.log 2>&1
+caffeinate -i npm run reel -- --auto --deliver --style 3d >> logs/nightly.log 2>&1
 STATUS=$?
 echo "$(date) exit $STATUS" >> logs/nightly.log
 [ $STATUS -eq 0 ] && touch "$MARK"

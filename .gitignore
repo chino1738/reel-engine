@@ -5,3 +5,4 @@ work/
 public/work/
 public/fluent/
 logs/
+!.env.example
